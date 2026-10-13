@@ -1,0 +1,5 @@
+numpy
+scipy
+pillow
+matplotlib
+tkinterdnd2  # optional: drag-and-drop of the image onto the window
