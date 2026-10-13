@@ -13,22 +13,33 @@ resulting data, normalized to the maximum.)
 
 ## Workflow
 
-1. **Open the image** (File → Open Image, drop it on the window, or pass it on the command line).
-2. **Calibrate the axes.** *Calibrate X axis*: click a tick of known value, type the value, then do the
-   same on a second tick far from the first. Zoom in with the toolbar first for precision. The Y axis
-   is optional (see below). Reversed axes (e.g. FTIR wavenumbers) work.
-3. **Add the traces.** *Add trace (draw box)* and drag a box around one curve, leaving out axis
-   labels, legends and panel letters. Repeat for each curve. Then, per trace:
-   - *Pick curve colour* — click on the curve to extract only pixels of that colour (several coloured
-     curves in the same box, coloured lines over a grid...). *Dark pixels* goes back to black curves.
-   - *Exclude area* — drag a box over something inside the trace's box that must be ignored.
-   - *Set zero line* — click the zero level of the trace (only used without a Y calibration).
-   - Rename (also by double-click) or Remove.
-4. **Tune and export.** The parameters (dark threshold, colour tolerance, maximum single-dot size,
-   output X step, Savitzky-Golay smoothing, normalization) act live on the result plot. *Export CSV*.
+The panel on the right always says what to do next, and a magnifier follows the mouse so that points
+can be placed precisely (it also shows the pixel and, once calibrated, the X/Y value under the cursor).
+
+- **Move around the image:** mouse wheel = zoom, drag = move; *Fit to window* resets the view. These
+  never interfere with the tools below. `Esc` cancels the tool that is waiting for a click.
+- **Open the image** (File → Open Image, drop it on the window, or pass it on the command line).
+- **1. Axes.** Press *Pick* next to *X point 1*, click a tick of known value, then type its value in the
+  box; do the same for *X point 2* on a tick far from the first. The Y axis is optional (see below).
+  Reversed axes (e.g. FTIR wavenumbers) work. A point can be re-picked at any time.
+- **Fine-tuning with the keyboard:** after picking a point (or setting a zero line) the arrow keys move
+  it by 1 pixel (`Shift` = 0.2 pixel): ← → for X points, ↑ ↓ for Y points and zero lines. Clicking in a
+  value box selects that point for the arrows; the selected point is drawn in orange. The magnifier
+  follows the point being moved.
+- **2. Curves.** *Add curve* and drag a box around one curve, leaving out axis labels, legends and
+  panel letters; repeat for each curve. For the selected curve:
+  - *Pick its colour* — click on the curve to extract only pixels of that colour (several coloured
+    curves in the same box, coloured lines over a grid...). *Black curve* goes back to dark pixels.
+  - *Ignore an area* — drag a box over something inside the curve's box that must be skipped (a
+    panel letter, a legend: they show up as spikes in the result plot).
+  - *Set zero line* — click the zero level of the curve (only used without a Y calibration).
+  - Rename (also by double-click) or Remove.
+- **3. Output.** X step, smoothing and normalization act live on the result plot under the image (drag the boundary between them to give more room to the image);
+  *Show the extracted points* toggles the red dots on the image, and *Advanced extraction settings*
+  has the dark threshold, colour tolerance and single-dot size. *Export CSV*.
 
 **Auto-detect panels** is a shortcut for framed, Origin-style figures with one or more stacked
-panels: it finds the frame, creates one trace per panel, calibrates X from the left/right frame edges
+panels: it finds the frame, creates one curve per panel, calibrates X from the left/right frame edges
 (you type the two X values), finds each panel's zero tick and hides the panel letter.
 
 ### Y values
@@ -56,7 +67,8 @@ treats the spectra as FTIR.
   compressed ones give noisy curves (raise the smoothing).
 - Dotted curves: dots are recognised by size (*Max dot size*); dots touching each other are treated
   as a continuous line.
-- **Verified only on the synthetic test figure in `examples/`**: on it, the extracted curves match the
+- **Verified only on the synthetic test figure in `examples/`** (the whole workflow, with real mouse events
+sent to the window: zoom, pan, axis points, boxes, ignoring an area, Y calibration, export): on it, the extracted curves match the
   data they were drawn from to within 0.2 % of the panel height on average (peak positions to 1 nm
   over a 550 nm axis). It has **not** been tried yet on figures from real publications, scans or
   JPEGs: if one fails, send the image.

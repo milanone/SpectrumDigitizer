@@ -13,7 +13,7 @@ import os
 import sys
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageTk
 from scipy import ndimage as ndi
 from scipy.signal import savgol_filter
 
@@ -22,7 +22,7 @@ from tkinter import filedialog, messagebox, ttk
 import matplotlib
 matplotlib.use('TkAgg')
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import Rectangle
 from matplotlib.widgets import RectangleSelector
 
@@ -186,23 +186,35 @@ def smooth_values(v, window, poly):
 # GUI
 # ----------------------------------------------------------------------------------------
 
+LOUPE_SIZE = 168      # pixels of the magnifier widget
+LOUPE_RADIUS = 14     # image pixels shown on each side of the cursor
+
+
 class SpectrumDigitizer:
     def __init__(self, root):
         self.root = root
         root.title("Spectrum Digitizer")
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-        w, h = min(1400, int(sw * 0.9)), min(860, int(sh * 0.8))
-        root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+        w, h = min(1400, int(sw * 0.92)), min(880, int(sh * 0.85))
+        root.geometry(f"{w}x{h}+{(sw - w) // 2}+{max((sh - h) // 3, 0)}")
 
         self.image_path = None
         self.rgb = None
-        self.xcal = None          # ((px1, v1), (px2, v2)) or None
-        self.ycal = None
+        self.pil = None
+        # Calibration: two points per axis; the pixel position is clicked on the image, the value
+        # is typed in the panel. 'x1','x2' hold a pixel column, 'y1','y2' a pixel row.
+        self.cal_px = {k: None for k in ('x1', 'x2', 'y1', 'y2')}
+        self.cal_var = {k: tk.StringVar() for k in self.cal_px}
         self.traces = []          # dicts: name, roi, color, zero, exclude, xpx, ypx
-        self.mode = None          # 'xcal' | 'ycal' | 'color' | 'zero' | 'roi' | 'excl' | None
-        self._cal_pending = []    # points of the calibration being collected: (px, value)
+        self.mode = None          # 'pick' | 'color' | 'zero' | 'roi' | 'excl' | None
+        self._pick_key = None
         self._overlay = []
         self._update_job = None
+        self._pan = None
+        self._loupe_photo = None
+        self._sticky = False      # True: keep the last status message instead of the generic hint
+        self._nudge = None        # point the arrow keys move: ('cal', key) or ('zero', trace)
+        self._last_xy = None      # last cursor position over the image (for the magnifier)
 
         menu = tk.Menu(root)
         fm = tk.Menu(menu, tearoff=0)
@@ -212,6 +224,11 @@ class SpectrumDigitizer:
         fm.add_command(label="Exit", command=root.destroy)
         menu.add_cascade(label="File", menu=fm)
         root.config(menu=menu)
+        root.bind('<Escape>', lambda e: self._on_escape())
+        # Arrow keys fine-tune the last point that was set (1 px; with Shift 0.2 px).
+        for name, dx, dy in (('Left', -1, 0), ('Right', 1, 0), ('Up', 0, -1), ('Down', 0, 1)):
+            root.bind(f'<{name}>', lambda e, dx=dx, dy=dy: self._on_arrow(e, dx, dy, False))
+            root.bind(f'<Shift-{name}>', lambda e, dx=dx, dy=dy: self._on_arrow(e, dx, dy, True))
         if HAS_DND:
             root.drop_target_register(DND_FILES)
             root.dnd_bind('<<Drop>>', lambda e: self.load_image(root.tk.splitlist(e.data)[0].strip('{}')))
@@ -219,58 +236,104 @@ class SpectrumDigitizer:
         paned = tk.PanedWindow(root, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, sashwidth=4)
         paned.pack(fill=tk.BOTH, expand=True)
 
+        # Left: image (large) with a small live preview of the result underneath. No matplotlib
+        # toolbar: its pan/zoom tools swallow the clicks of the calibration and trace tools, so
+        # navigation is done directly (wheel = zoom, drag = move) and never conflicts with them.
         f_plot = tk.Frame(paned)
-        self.fig = Figure(figsize=(7, 7))
-        gs = self.fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.22)
-        self.ax_img = self.fig.add_subplot(gs[0])
-        self.ax_res = self.fig.add_subplot(gs[1])
-        self.fig.subplots_adjust(left=0.08, right=0.98, top=0.98, bottom=0.07)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=f_plot)
-        self.toolbar = NavigationToolbar2Tk(self.canvas, f_plot)
-        self.toolbar.update()
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        self.canvas.mpl_connect('button_press_event', self._on_click)
+        bar = tk.Frame(f_plot)
+        bar.pack(fill=tk.X)
+        tk.Button(bar, text="Fit to window", command=self._fit_view).pack(side=tk.LEFT, padx=4, pady=2)
+        tk.Button(bar, text="Zoom +", command=lambda: self._zoom_step(0.7)).pack(side=tk.LEFT, pady=2)
+        tk.Button(bar, text="Zoom −", command=lambda: self._zoom_step(1 / 0.7)).pack(side=tk.LEFT, padx=4, pady=2)
+        tk.Label(bar, text="Mouse wheel = zoom,  drag = move the image", fg='#666666').pack(side=tk.LEFT, padx=8)
+        # Image and result preview are separate canvases in a vertical paned window, so the
+        # boundary can be dragged (a tall image needs the room more than the preview does).
+        vp = tk.PanedWindow(f_plot, orient=tk.VERTICAL, sashrelief=tk.RAISED, sashwidth=6)
+        vp.pack(fill=tk.BOTH, expand=True)
+        self.fig = Figure(figsize=(7, 6))
+        self.ax_img = self.fig.add_subplot(111)
+        self.fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=vp)
+        vp.add(self.canvas.get_tk_widget(), stretch='always', minsize=150)
+        self.fig_res = Figure(figsize=(7, 2))
+        self.ax_res = self.fig_res.add_subplot(111)
+        self.fig_res.subplots_adjust(left=0.07, right=0.99, top=0.95, bottom=0.2)
+        self.canvas_res = FigureCanvasTkAgg(self.fig_res, master=vp)
+        vp.add(self.canvas_res.get_tk_widget(), height=190, stretch='never', minsize=70)
+        for ev, fn in (('button_press_event', self._on_press), ('button_release_event', self._on_release),
+                       ('motion_notify_event', self._on_motion), ('scroll_event', self._on_scroll)):
+            self.canvas.mpl_connect(ev, fn)
         self.selector = RectangleSelector(self.ax_img, self._on_rect, useblit=True, button=[1],
                                           interactive=False, minspanx=3, minspany=3,
                                           props=dict(facecolor='none', edgecolor='red', linestyle='--'))
         self.selector.set_active(False)
-        paned.add(f_plot, width=1000)
+        paned.add(f_plot, width=980)
 
         self.f_right = tk.Frame(paned, bg='#f0f4f7')
         self._build_panel(self.f_right)
-        paned.add(self.f_right, width=380)
+        paned.add(self.f_right, width=400)
 
         self._show_empty()
-        self._set_status("Open an image (File -> Open Image, or drop it on the window).")
+        self._update_hint()
         if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
             self.load_image(sys.argv[1])
 
-    # ---- panel ----
+    # ---- right panel ----
     def _build_panel(self, parent):
         bg = '#f0f4f7'
-        self.status = tk.Label(parent, text="", bg='#fff8e1', wraplength=350, justify='left',
-                               anchor='w', font=('Arial', 9), relief=tk.GROOVE, padx=6, pady=6)
-        self.status.pack(fill=tk.X, padx=10, pady=(10, 6))
+        self.status = tk.Label(parent, text="", bg='#fff3c4', wraplength=370, justify='left', anchor='w',
+                               font=('Arial', 10), relief=tk.GROOVE, padx=8, pady=8)
+        self.status.pack(fill=tk.X, padx=10, pady=(10, 4))
+        # Packed first, at the bottom: the Export button must stay visible whatever the window height.
+        tk.Button(parent, text="Export CSV...", command=self.export_csv, bg='#2ecc71', fg='white',
+                  font=('Arial', 10, 'bold')).pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=8)
 
-        tk.Label(parent, text="1. CALIBRATION", font=('Arial', 9, 'bold'), bg=bg).pack(anchor='w', padx=10)
+        lf = tk.Frame(parent, bg=bg)
+        lf.pack(fill=tk.X, padx=10)
+        self.loupe = tk.Label(lf, bg='#dddddd', width=LOUPE_SIZE // 8, height=LOUPE_SIZE // 16,
+                              relief=tk.SUNKEN)
+        self.loupe.pack(side=tk.LEFT)
+        self.cursor_label = tk.Label(lf, text="Move the mouse over\nthe image to see\nthe magnifier.",
+                                     bg=bg, justify='left', anchor='nw', font=('Consolas', 9), fg='#444444')
+        self.cursor_label.pack(side=tk.LEFT, padx=8, anchor='n')
+
+        # 1. axes
+        self.l_axes = tk.Label(parent, text="1. AXES", font=('Arial', 10, 'bold'), bg=bg, anchor='w')
+        self.l_axes.pack(fill=tk.X, padx=10, pady=(8, 0))
+        tk.Label(parent, text="Pick a point of known value on the image, then type its value.",
+                 bg=bg, fg='#555555', font=('Arial', 8), anchor='w').pack(fill=tk.X, padx=10)
+        self.pick_buttons = {}
+        self.px_labels = {}
+        grid = tk.Frame(parent, bg=bg)
+        grid.pack(fill=tk.X, padx=10, pady=2)
+        self.cal_entries = {}
+        names = {'x1': 'X point 1', 'x2': 'X point 2', 'y1': 'Y point 1 (optional)', 'y2': 'Y point 2 (optional)'}
+        for r, key in enumerate(('x1', 'x2', 'y1', 'y2')):
+            tk.Label(grid, text=names[key], bg=bg, anchor='w', width=19, font=('Arial', 9)).grid(row=r, column=0, sticky='w')
+            b = tk.Button(grid, text="Pick", width=5, command=lambda k=key: self._start_pick(k))
+            b.grid(row=r, column=1, padx=2, pady=1)
+            self.pick_buttons[key] = b
+            e = tk.Entry(grid, textvariable=self.cal_var[key], width=9)
+            e.grid(row=r, column=2, padx=2)
+            self.cal_entries[key] = e
+            e.bind('<FocusIn>', lambda ev, k=key: self._set_nudge(('cal', k)))
+            lab = tk.Label(grid, text="not set", bg=bg, fg='#999999', font=('Consolas', 8), width=14, anchor='w')
+            lab.grid(row=r, column=3, padx=2)
+            self.px_labels[key] = lab
+            self.cal_var[key].trace_add('write', lambda *_: self._on_cal_edit())
+        tk.Button(parent, text="Clear Y axis", command=lambda: self._clear_axis('y'), font=('Arial', 8)).pack(
+            anchor='e', padx=10)
+
+        # 2. curves
+        tk.Label(parent, text="2. CURVES", font=('Arial', 10, 'bold'), bg=bg, anchor='w').pack(
+            fill=tk.X, padx=10, pady=(6, 0))
         row = tk.Frame(parent, bg=bg)
         row.pack(fill=tk.X, padx=10)
-        tk.Button(row, text="Calibrate X axis", command=lambda: self._start_cal('xcal')).pack(
-            side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        tk.Button(row, text="Calibrate Y axis", command=lambda: self._start_cal('ycal')).pack(
-            side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        self.cal_label = tk.Label(parent, text="", bg=bg, font=('Consolas', 8), fg='#555555',
-                                  justify='left', anchor='w')
-        self.cal_label.pack(fill=tk.X, padx=10)
-
-        tk.Label(parent, text="2. TRACES", font=('Arial', 9, 'bold'), bg=bg).pack(anchor='w', padx=10, pady=(8, 0))
-        row = tk.Frame(parent, bg=bg)
-        row.pack(fill=tk.X, padx=10)
-        tk.Button(row, text="Add trace (draw box)", command=lambda: self._start_rect('roi'),
-                  bg='#e8f5e9').pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(row, text="Add curve (drag a box)", command=lambda: self._start_rect('roi'),
+                  bg='#c8e6c9', font=('Arial', 9, 'bold')).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         tk.Button(row, text="Auto-detect panels", command=self.auto_panels,
                   bg='#e3f2fd').pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        self.listbox = tk.Listbox(parent, height=6, exportselection=False, font=('Arial', 9))
+        self.listbox = tk.Listbox(parent, height=3, exportselection=False, font=('Arial', 9))
         self.listbox.pack(fill=tk.X, padx=10, pady=4)
         self.listbox.bind('<<ListboxSelect>>', lambda e: self._redraw())
         self.listbox.bind('<Double-Button-1>', lambda e: self.rename_trace())
@@ -278,51 +341,109 @@ class SpectrumDigitizer:
         row.pack(fill=tk.X, padx=10)
         tk.Button(row, text="Rename", command=self.rename_trace).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         tk.Button(row, text="Remove", command=self.remove_trace).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Label(parent, text="For the selected curve:", bg=bg, fg='#555555', font=('Arial', 8), anchor='w').pack(
+            fill=tk.X, padx=10, pady=(4, 0))
         row = tk.Frame(parent, bg=bg)
-        row.pack(fill=tk.X, padx=10, pady=(2, 0))
-        tk.Button(row, text="Pick curve colour", command=lambda: self._start_point('color')).pack(
+        row.pack(fill=tk.X, padx=10)
+        tk.Button(row, text="Pick its colour", command=lambda: self._start_point('color')).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        tk.Button(row, text="Dark pixels", command=self.use_dark).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(row, text="Black curve", command=self.use_dark).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         row = tk.Frame(parent, bg=bg)
         row.pack(fill=tk.X, padx=10, pady=(2, 0))
-        tk.Button(row, text="Exclude area", command=lambda: self._start_rect('excl')).pack(
+        tk.Button(row, text="Ignore an area", command=lambda: self._start_rect('excl')).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         tk.Button(row, text="Set zero line", command=lambda: self._start_point('zero')).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
-        tk.Label(parent, text="3. EXTRACTION AND OUTPUT", font=('Arial', 9, 'bold'),
-                 bg=bg).pack(anchor='w', padx=10, pady=(8, 0))
+        # 3. output
+        tk.Label(parent, text="3. OUTPUT", font=('Arial', 10, 'bold'), bg=bg, anchor='w').pack(
+            fill=tk.X, padx=10, pady=(6, 0))
         grid = tk.Frame(parent, bg=bg)
         grid.pack(fill=tk.X, padx=10)
+        self.v_step = tk.StringVar(value='1')
+        self.v_smooth = tk.StringVar(value='0')
+        self.v_norm = tk.StringVar(value='none')
+        self.v_points = tk.BooleanVar(value=True)
+        for r, (label, var) in enumerate((("X step", self.v_step), ("Smoothing window (X units, 0 = off)", self.v_smooth))):
+            tk.Label(grid, text=label, bg=bg, anchor='w', font=('Arial', 9)).grid(row=r, column=0, sticky='w', pady=1)
+            tk.Entry(grid, textvariable=var, width=8).grid(row=r, column=1, padx=6)
+            var.trace_add('write', lambda *_: self._schedule(False))
+        tk.Label(grid, text="Normalize", bg=bg, anchor='w', font=('Arial', 9)).grid(row=2, column=0, sticky='w')
+        cb = ttk.Combobox(grid, textvariable=self.v_norm, values=['none', 'max'], width=6, state='readonly')
+        cb.grid(row=2, column=1, padx=6, pady=1)
+        cb.bind('<<ComboboxSelected>>', lambda e: self._redraw())
+        tk.Checkbutton(parent, text="Show the extracted points on the image", variable=self.v_points,
+                       bg=bg, command=self._redraw, anchor='w').pack(fill=tk.X, padx=10)
+
+        self.v_adv = tk.BooleanVar(value=False)
+        self.adv_check = tk.Checkbutton(parent, text="Advanced extraction settings", variable=self.v_adv,
+                                        bg=bg, anchor='w', command=self._toggle_advanced)
+        self.adv_check.pack(fill=tk.X, padx=10)
+        self.f_adv = tk.Frame(parent, bg=bg)
         self.v_thresh = tk.StringVar(value='128')
         self.v_tol = tk.StringVar(value='60')
         self.v_dot = tk.StringVar(value='1.2')
-        self.v_step = tk.StringVar(value='1')
-        self.v_smooth = tk.StringVar(value='0')
         self.v_poly = tk.StringVar(value='3')
-        self.v_norm = tk.StringVar(value='none')
-        params = [("Dark threshold (0-255)", self.v_thresh, True),
-                  ("Colour tolerance", self.v_tol, True),
-                  ("Max dot size (% width)", self.v_dot, True),
-                  ("X step", self.v_step, False),
-                  ("Smoothing window (X units)", self.v_smooth, False),
-                  ("Smoothing polynomial order", self.v_poly, False)]
-        for r, (label, var, extract) in enumerate(params):
-            tk.Label(grid, text=label, bg=bg, anchor='w', font=('Arial', 9)).grid(row=r, column=0, sticky='w', pady=1)
-            tk.Entry(grid, textvariable=var, width=8).grid(row=r, column=1, padx=6)
+        for r, (label, var, extract) in enumerate((("Dark threshold (0-255)", self.v_thresh, True),
+                                                   ("Colour tolerance", self.v_tol, True),
+                                                   ("Max single-dot size (% of width)", self.v_dot, True),
+                                                   ("Smoothing polynomial order", self.v_poly, False))):
+            tk.Label(self.f_adv, text=label, bg=bg, anchor='w', font=('Arial', 9)).grid(row=r, column=0, sticky='w', pady=1)
+            tk.Entry(self.f_adv, textvariable=var, width=8).grid(row=r, column=1, padx=6)
             var.trace_add('write', lambda *_, e=extract: self._schedule(e))
-        tk.Label(grid, text="Normalize", bg=bg, anchor='w', font=('Arial', 9)).grid(row=len(params), column=0, sticky='w')
-        cb = ttk.Combobox(grid, textvariable=self.v_norm, values=['none', 'max'], width=6, state='readonly')
-        cb.grid(row=len(params), column=1, padx=6, pady=1)
-        cb.bind('<<ComboboxSelected>>', lambda e: self._redraw())
-        self.info = tk.Label(parent, text="", bg=bg, font=('Consolas', 8), fg='#555555',
-                             wraplength=350, justify='left', anchor='w')
-        self.info.pack(fill=tk.X, padx=10, pady=4)
-        tk.Button(parent, text="Export CSV...", command=self.export_csv, bg='#2ecc71', fg='white',
-                  font=('Arial', 9, 'bold')).pack(fill=tk.X, padx=12, pady=8)
 
-    def _set_status(self, text):
-        self.status.config(text=text)
+        self.info = tk.Label(parent, text="", bg=bg, font=('Consolas', 8), fg='#555555',
+                             wraplength=370, justify='left', anchor='w')
+        self.info.pack(fill=tk.X, padx=10, pady=4)
+
+    def _toggle_advanced(self):
+        if self.v_adv.get():
+            self.f_adv.pack(fill=tk.X, padx=10, after=self.adv_check)
+        else:
+            self.f_adv.pack_forget()
+
+    # ---- calibration ----
+    @staticmethod
+    def _to_float(text):
+        try:
+            return float(text.strip().replace(',', '.'))
+        except ValueError:
+            return None
+
+    def _cal(self, axis):
+        """((p1, v1), (p2, v2)) if the two points and values of the axis are usable, else None."""
+        p1, p2 = self.cal_px[axis + '1'], self.cal_px[axis + '2']
+        v1, v2 = self._to_float(self.cal_var[axis + '1'].get()), self._to_float(self.cal_var[axis + '2'].get())
+        if None in (p1, p2, v1, v2) or abs(p2 - p1) < 3 or v1 == v2:
+            return None
+        return (p1, v1), (p2, v2)
+
+    @property
+    def xcal(self):
+        return self._cal('x')
+
+    @property
+    def ycal(self):
+        return self._cal('y')
+
+    def _set_cal(self, axis, a, b):
+        for key, (p, v) in ((axis + '1', a), (axis + '2', b)):
+            self.cal_px[key] = float(p)
+            self.cal_var[key].set(f"{v:g}")
+        self._update_px_labels()
+
+    def _clear_axis(self, axis):
+        for key in (axis + '1', axis + '2'):
+            self.cal_px[key] = None
+            self.cal_var[key].set('')
+        self._update_px_labels()
+        self._redraw()
+
+    def _update_px_labels(self):
+        for key, lab in self.px_labels.items():
+            p = self.cal_px[key]
+            lab.config(text="not set" if p is None else f"{p:.1f} px",
+                       fg='#999999' if p is None else '#006600')
 
     # ---- image ----
     def open_dialog(self):
@@ -338,41 +459,227 @@ class SpectrumDigitizer:
             messagebox.showerror("Open image", f"Cannot open the image:\n{e}")
             return
         self.image_path = path
+        self.pil = img
         self.rgb = np.asarray(img, dtype=float)
-        self.xcal = self.ycal = None
         self.traces = []
-        self._cal_pending = []
-        self._set_mode(None)
+        for axis in ('x', 'y'):
+            for key in (axis + '1', axis + '2'):
+                self.cal_px[key] = None
+                self.cal_var[key].set('')
+        self._update_px_labels()
+        self._nudge = None
+        self._cancel_tool()
         self.ax_img.clear()
-        self.ax_img.imshow(self.rgb.astype(np.uint8), interpolation='nearest')
-        self.ax_img.tick_params(labelsize=7)
+        # The image is shown as it is (default interpolation: no pixel dropping when zoomed out).
+        self.ax_img.imshow(self.rgb.astype(np.uint8))
+        self.ax_img.set_aspect('equal', adjustable='box')
+        self.ax_img.set_axis_off()
+        self._overlay = []
         self.root.title(f"Spectrum Digitizer - {os.path.basename(path)}")
         self._refresh_list()
-        self._set_status("Step 1: calibrate the X axis (and the Y axis, if you want calibrated ordinates), "
-                         "then add the traces. For framed Origin-style plots try 'Auto-detect panels'.")
+        self._fit_view()
         self._redraw()
-        self.toolbar.update()
 
     def _show_empty(self):
         self.ax_img.clear()
         self.ax_img.set_axis_off()
         self.ax_res.clear()
         self.canvas.draw_idle()
+        self.canvas_res.draw_idle()
 
-    # ---- modes and clicks ----
-    def _toolbar_off(self):
-        """Matplotlib's pan/zoom tool swallows canvas clicks while active."""
-        m = getattr(self.toolbar.mode, 'value', self.toolbar.mode)
-        if m and 'pan' in str(m).lower():
-            self.toolbar.pan()
-        elif m and 'zoom' in str(m).lower():
-            self.toolbar.zoom()
+    # ---- view: zoom, pan, loupe ----
+    def _fit_view(self):
+        if self.rgb is None:
+            return
+        H, W = self.rgb.shape[:2]
+        self.ax_img.set_xlim(-0.5, W - 0.5)
+        self.ax_img.set_ylim(H - 0.5, -0.5)
+        self.canvas.draw_idle()
 
-    def _set_mode(self, mode):
-        self.mode = mode
+    def _zoom_at(self, factor, xd, yd):
+        ax = self.ax_img
+        x0, x1 = ax.get_xlim()
+        y0, y1 = ax.get_ylim()
+        ax.set_xlim(xd - (xd - x0) * factor, xd + (x1 - xd) * factor)
+        ax.set_ylim(yd - (yd - y0) * factor, yd + (y1 - yd) * factor)
+        self.canvas.draw_idle()
+
+    def _zoom_step(self, factor):
+        if self.rgb is None:
+            return
+        x0, x1 = self.ax_img.get_xlim()
+        y0, y1 = self.ax_img.get_ylim()
+        self._zoom_at(factor, (x0 + x1) / 2, (y0 + y1) / 2)
+
+    def _on_scroll(self, event):
+        if self.rgb is None or event.inaxes is not self.ax_img:
+            return
+        self._zoom_at(0.75 if event.button == 'up' else 1 / 0.75, event.xdata, event.ydata)
+
+    def _on_press(self, event):
+        if self.rgb is None or event.inaxes is not self.ax_img or event.xdata is None:
+            return
+        ax = self.ax_img
+        # Drag = move the image, unless a tool is waiting for a click/box (then only the
+        # right and middle buttons move it).
+        if event.button in (2, 3) or (event.button == 1 and self.mode is None):
+            self._pan = (event.x, event.y, ax.get_xlim(), ax.get_ylim())
+            self.canvas.get_tk_widget().config(cursor='fleur')
+            return
+        if event.button != 1:
+            return
+        x, y = event.xdata, event.ydata
+        H, W = self.rgb.shape[:2]
+        if self.mode == 'pick':
+            key = self._pick_key
+            self.cal_px[key] = x if key[0] == 'x' else y
+            self._cancel_tool(keep_status=True)
+            self._update_px_labels()
+            self._nudge = ('cal', key)
+            self.cal_entries[key].focus_set()
+            self.cal_entries[key].select_range(0, tk.END)
+            self._set_status(f"Point set: fine-tune it with the arrow keys ({'←→' if key[0] == 'x' else '↑↓'}, "
+                             f"Shift = finer), then type its value in the box ({key[0].upper()} point {key[1]}).",
+                             ok=True, sticky=True)
+            self._redraw()
+        elif self.mode == 'color':
+            px = self.rgb[min(max(int(round(y)), 0), H - 1), min(max(int(round(x)), 0), W - 1)]
+            if px.min() > 235:
+                self._set_status("That pixel is white: click right on the curve.")
+                return
+            tr = self._selected()
+            tr['color'] = tuple(int(v) for v in px)
+            self._cancel_tool(keep_status=True)
+            self._set_status(f"Curve colour set to RGB {tr['color']}.", ok=True, sticky=True)
+            self._extract_all()
+        elif self.mode == 'zero':
+            tr = self._selected()
+            tr['zero'] = float(y)
+            self._nudge = ('zero', tr)
+            self._cancel_tool(keep_status=True)
+            self._set_status("Zero line set: fine-tune it with the ↑↓ keys (Shift = finer).", ok=True, sticky=True)
+            self._redraw()
+
+    def _on_release(self, event):
+        if self._pan is not None:
+            self._pan = None
+            self.canvas.get_tk_widget().config(cursor='crosshair' if self.mode else '')
+
+    def _on_motion(self, event):
+        if self.rgb is None:
+            return
+        if self._pan is not None:
+            x0, y0, xlim, ylim = self._pan
+            bb = self.ax_img.get_window_extent()
+            sx = (xlim[1] - xlim[0]) / bb.width
+            sy = (ylim[1] - ylim[0]) / bb.height
+            dx, dy = (event.x - x0) * sx, (event.y - y0) * sy
+            self.ax_img.set_xlim(xlim[0] - dx, xlim[1] - dx)
+            self.ax_img.set_ylim(ylim[0] + dy, ylim[1] + dy)
+            self.canvas.draw_idle()
+            return
+        if event.inaxes is self.ax_img and event.xdata is not None:
+            self._last_xy = (event.xdata, event.ydata)
+            self._update_loupe(event.xdata, event.ydata)
+
+    def _update_loupe(self, x, y):
+        H, W = self.rgb.shape[:2]
+        r = LOUPE_RADIUS
+        cx, cy = int(round(x)), int(round(y))
+        crop = Image.new('RGB', (2 * r + 1, 2 * r + 1), (200, 200, 200))
+        sx0, sy0 = max(cx - r, 0), max(cy - r, 0)
+        sx1, sy1 = min(cx + r + 1, W), min(cy + r + 1, H)
+        if sx1 > sx0 and sy1 > sy0:
+            crop.paste(self.pil.crop((sx0, sy0, sx1, sy1)), (sx0 - (cx - r), sy0 - (cy - r)))
+        big = crop.resize((LOUPE_SIZE, LOUPE_SIZE), Image.NEAREST)
+        d = ImageDraw.Draw(big)
+        c, step = LOUPE_SIZE / 2, LOUPE_SIZE / (2 * r + 1)
+        d.line([(c, 0), (c, LOUPE_SIZE)], fill=(255, 0, 0), width=1)
+        d.line([(0, c), (LOUPE_SIZE, c)], fill=(255, 0, 0), width=1)
+        d.rectangle([c - step / 2, c - step / 2, c + step / 2, c + step / 2], outline=(0, 120, 255))
+        self._loupe_photo = ImageTk.PhotoImage(big)
+        self.loupe.config(image=self._loupe_photo, width=LOUPE_SIZE, height=LOUPE_SIZE)
+        text = f"pixel  x={x:7.1f}\n       y={y:7.1f}"
+        xc, yc = self.xcal, self.ycal
+        if xc:
+            text += f"\nX = {float(lin_map(xc, x)):.5g}"
+        if yc:
+            text += f"\nY = {float(lin_map(yc, y)):.5g}"
+        self.cursor_label.config(text=text)
+
+    # ---- tools ----
+    def _set_status(self, text, ok=False, sticky=False):
+        self._sticky = sticky
+        self.status.config(text=text, bg='#d9f2d9' if ok else '#fff3c4')
+
+    def _on_cal_edit(self):
+        self._sticky = False
+        self._schedule(False)
+
+    def _update_hint(self):
+        """Tell the user what to do next, from the current state."""
+        if self.mode is not None or self._sticky:
+            return
+        if self.rgb is None:
+            self._set_status("Open an image: File → Open Image, or drop it on this window.")
+        elif self.xcal is None:
+            self._set_status("Step 1 - X axis: press 'Pick' next to 'X point 1', click on a tick of the X axis, "
+                             "then type its value. Do the same for 'X point 2' on another tick, far from the first. "
+                             "(Wheel = zoom for precision.)")
+        elif not self.traces:
+            self._set_status("Step 2 - press 'Add curve' and drag a box around one curve "
+                             "(or try 'Auto-detect panels' for framed Origin-style plots).", ok=True)
+        elif not any(len(t['xpx']) for t in self.traces):
+            self._set_status("No curve points found in the box: draw the box again around the curve, or "
+                             "check the curve colour / black-curve setting.")
+        else:
+            self._set_status("Step 3 - check the red points on the curve and the result below the image, "
+                             "adjust step / smoothing if needed, then press 'Export CSV'.", ok=True)
+
+    def _cancel_tool(self, keep_status=False):
+        self.mode = None
+        self._pick_key = None
         self.selector.set_active(False)
         self.selector.set_visible(False)
-        self.canvas.get_tk_widget().config(cursor='crosshair' if mode else '')
+        self.canvas.get_tk_widget().config(cursor='')
+        if not keep_status:
+            self._update_hint()
+
+    def _on_escape(self):
+        self._nudge = None
+        self._cancel_tool()
+        self._redraw()
+
+    def _set_nudge(self, target):
+        """Select the point the arrow keys move (only if it has been set)."""
+        kind, ref = target
+        if kind == 'cal' and self.cal_px[ref] is None:
+            return
+        self._nudge = target
+        self._redraw()
+
+    def _on_arrow(self, event, dx, dy, fine):
+        if self._nudge is None or self.rgb is None or self.mode is not None:
+            return
+        if isinstance(event.widget, (tk.Listbox, ttk.Combobox, tk.Text)):
+            return
+        amount = 0.2 if fine else 1.0
+        kind, ref = self._nudge
+        if kind == 'cal':
+            axis_step = dx if ref[0] == 'x' else dy
+            if axis_step == 0 or self.cal_px[ref] is None:
+                return
+            self.cal_px[ref] += axis_step * amount
+            self._update_px_labels()
+            pos = (self.cal_px[ref], (self._last_xy or (0, self.rgb.shape[0] / 2))[1]) if ref[0] == 'x'                 else ((self._last_xy or (self.rgb.shape[1] / 2, 0))[0], self.cal_px[ref])
+        else:
+            if dy == 0 or ref['zero'] is None or ref not in self.traces:
+                return
+            ref['zero'] += dy * amount
+            pos = (ref['roi'][0], ref['zero'])
+        self._update_loupe(*pos)
+        self._redraw()
+        return 'break'
 
     def _need_image(self):
         if self.rgb is None:
@@ -380,91 +687,43 @@ class SpectrumDigitizer:
             return False
         return True
 
-    def _start_cal(self, kind):
+    def _start_pick(self, key):
         if not self._need_image():
             return
-        self._toolbar_off()
-        self._cal_pending = []
-        self._set_mode(kind)
-        axis = 'X' if kind == 'xcal' else 'Y'
-        where = "a tick of the X axis" if kind == 'xcal' else "a tick of the Y axis"
-        self._set_status(f"Calibrate {axis}: click on {where} (zoom in first for precision), then type its value. "
-                         "Then do the same on a second point, far from the first.")
+        self._cancel_tool(keep_status=True)
+        self._nudge = None
+        self.mode, self._pick_key = 'pick', key
+        self.canvas.get_tk_widget().config(cursor='crosshair')
+        what = "X axis tick" if key[0] == 'x' else "Y axis tick"
+        self._set_status(f"Click on the {what} of known value (the magnifier on the right helps). "
+                         "Esc cancels.")
 
     def _start_rect(self, purpose):
         if not self._need_image():
             return
         if purpose == 'excl' and self._selected() is None:
-            messagebox.showwarning("Exclude area", "Add and select a trace first.")
+            messagebox.showwarning("Ignore an area", "Add and select a curve first.")
             return
-        self._toolbar_off()
-        self._set_mode(purpose)
+        self._cancel_tool(keep_status=True)
+        self._nudge = None
+        self.mode = purpose
         self.selector.set_active(True)
-        self._set_status("Drag a box around the curve (include only the curve: leave out axis labels, "
-                         "legends and panel letters)." if purpose == 'roi' else
-                         "Drag a box around what must be ignored in the selected trace (a panel letter, a legend...).")
+        self.canvas.get_tk_widget().config(cursor='crosshair')
+        self._set_status("Drag a box around the curve: include only the curve, leave out axis labels, "
+                         "legends and panel letters. Esc cancels." if purpose == 'roi' else
+                         "Drag a box over what the selected curve must ignore (a panel letter, a legend...). "
+                         "Esc cancels.")
 
     def _start_point(self, kind):
-        tr = self._selected()
-        if tr is None:
-            messagebox.showwarning("Spectrum Digitizer", "Add and select a trace first.")
+        if self._selected() is None:
+            messagebox.showwarning("Spectrum Digitizer", "Add and select a curve first.")
             return
-        self._toolbar_off()
-        self._set_mode(kind)
-        self._set_status("Click on a pixel of the curve." if kind == 'color' else
-                         "Click on the zero level of this trace (Y = height above this line).")
-
-    def _on_click(self, event):
-        if self.mode in (None, 'roi', 'excl') or event.inaxes is not self.ax_img or event.button != 1:
-            return
-        if getattr(self.toolbar.mode, 'value', self.toolbar.mode):
-            return
-        x, y = event.xdata, event.ydata
-        if self.mode in ('xcal', 'ycal'):
-            val = self._ask_form("Calibration", [("Value at this point:", "")])
-            if val is None:
-                return
-            try:
-                v = float(val[0].replace(',', '.'))
-            except ValueError:
-                messagebox.showwarning("Calibration", "Enter a number.")
-                return
-            self._cal_pending.append((x if self.mode == 'xcal' else y, v))
-            if len(self._cal_pending) == 2:
-                (p1, v1), (p2, v2) = self._cal_pending
-                if abs(p2 - p1) < 5 or v1 == v2:
-                    messagebox.showwarning("Calibration", "The two points must differ in both position and value.")
-                    self._cal_pending = []
-                else:
-                    cal = tuple(self._cal_pending)
-                    if self.mode == 'xcal':
-                        self.xcal = cal
-                    else:
-                        self.ycal = cal
-                    self._cal_pending = []
-                    self._set_mode(None)
-                    self._set_status("Calibration set. Add the traces (draw a box around each curve).")
-                    self._extract_all()
-                    return
-            else:
-                self._set_status("Now click on a second point, far from the first.")
-            self._redraw()
-        elif self.mode == 'color':
-            px = self.rgb[int(round(y)), int(round(x))]
-            if px.min() > 235:
-                messagebox.showwarning("Pick curve colour", "That pixel is white: click right on the curve.")
-                return
-            tr = self._selected()
-            tr['color'] = tuple(int(v) for v in px)
-            self._set_mode(None)
-            self._set_status(f"Curve colour set to RGB {tr['color']}.")
-            self._extract_all()
-        elif self.mode == 'zero':
-            tr = self._selected()
-            tr['zero'] = float(y)
-            self._set_mode(None)
-            self._set_status("Zero line set.")
-            self._redraw()
+        self._cancel_tool(keep_status=True)
+        self._nudge = None
+        self.mode = kind
+        self.canvas.get_tk_widget().config(cursor='crosshair')
+        self._set_status("Click on a pixel of the curve (not on a white pixel). Esc cancels." if kind == 'color'
+                         else "Click on the zero level of this curve (Y = height above that line). Esc cancels.")
 
     def _on_rect(self, eclick, erelease):
         if self.mode not in ('roi', 'excl') or eclick.xdata is None or erelease.xdata is None:
@@ -474,17 +733,14 @@ class SpectrumDigitizer:
         if self.mode == 'roi':
             n = len(self.traces) + 1
             names = {t['name'] for t in self.traces}
-            while f"trace{n}" in names:
+            while f"curve{n}" in names:
                 n += 1
-            self.traces.append(dict(name=f"trace{n}", roi=box, color=None, zero=None, exclude=[],
+            self.traces.append(dict(name=f"curve{n}", roi=box, color=None, zero=None, exclude=[],
                                     xpx=np.array([]), ypx=np.array([])))
             self._refresh_list(select=len(self.traces) - 1)
-            self._set_status("Trace added. Use 'Pick curve colour' for a coloured curve, 'Exclude area' to "
-                             "hide letters or legends, and the parameters below to tune the extraction.")
         else:
             self._selected()['exclude'].append(box)
-            self._set_status("Area excluded.")
-        self._set_mode(None)
+        self._cancel_tool()
         self._extract_all()
 
     # ---- traces ----
@@ -515,7 +771,7 @@ class SpectrumDigitizer:
         if not new or new == tr['name']:
             return
         if any(t['name'] == new for t in self.traces):
-            messagebox.showwarning("Rename", f"A trace called '{new}' already exists.")
+            messagebox.showwarning("Rename", f"A curve called '{new}' already exists.")
             return
         tr['name'] = new
         self._refresh_list()
@@ -541,35 +797,29 @@ class SpectrumDigitizer:
         if not self._need_image():
             return
         if self.traces and not messagebox.askyesno(
-                "Auto-detect panels", "This replaces the current traces. Continue?"):
+                "Auto-detect panels", "This replaces the current curves. Continue?"):
             return
-        try:
-            thresh = float(self.v_thresh.get())
-        except ValueError:
-            thresh = 128.0
+        thresh = self._to_float(self.v_thresh.get()) or 128.0
         dark = (self.rgb @ np.array([0.299, 0.587, 0.114])) < thresh
         found = find_frame(dark)
         if found is None:
             messagebox.showwarning("Auto-detect panels",
                                    "Frame not found: it needs at least two long vertical and two long "
-                                   "horizontal lines. Use the manual calibration and 'Add trace' instead.")
+                                   "horizontal lines. Calibrate the axes and use 'Add curve' instead.")
             return
         left, right, rows = found
-        res = self._ask_form("Auto-detect panels", [("X value at the left frame edge:", ""),
-                                                    ("X value at the right frame edge:", "")])
+        res = self._ask_form("Auto-detect panels",
+                             [("X value at the LEFT edge of the frame:", self.cal_var['x1'].get()),
+                              ("X value at the RIGHT edge of the frame:", self.cal_var['x2'].get())])
         if res is None:
             return
-        try:
-            xmin, xmax = (float(v.replace(',', '.')) for v in res)
-        except ValueError:
-            messagebox.showwarning("Auto-detect panels", "Enter two numbers.")
-            return
-        if xmin == xmax:
-            messagebox.showwarning("Auto-detect panels", "The two X values must differ.")
+        xmin, xmax = self._to_float(res[0]), self._to_float(res[1])
+        if xmin is None or xmax is None or xmin == xmax:
+            messagebox.showwarning("Auto-detect panels", "Enter two different numbers.")
             return
         xl, xr = float(left.mean()), float(right.mean())
-        self.xcal = ((xl, xmin), (xr, xmax))
-        self.ycal = None
+        self._set_cal('x', (xl, xmin), (xr, xmax))
+        self._clear_axis('y')
         self.traces = []
         x_in0, x_in1 = left[-1] + 3, right[0] - 3
         for k in range(len(rows) - 1):
@@ -581,17 +831,14 @@ class SpectrumDigitizer:
                                     roi=(x_in0, top + my, x_in1, bottom - my), color=None, zero=zero,
                                     exclude=[letter], xpx=np.array([]), ypx=np.array([])))
         self._refresh_list(select=0)
-        self._set_status(f"{len(self.traces)} panel(s) found. Y is in pixels above each panel's zero tick: "
-                         "normalize to the maximum, or calibrate the Y axis, as needed.")
         self._extract_all()
+        self._set_status(f"{len(self.traces)} panel(s) found. Y is in pixels above each panel's zero tick: "
+                         "use 'Normalize: max', or calibrate the Y axis, as needed.", ok=True, sticky=True)
 
     # ---- computation ----
     def _num(self, var, default, lo=None):
-        try:
-            v = float(var.get().replace(',', '.'))
-        except ValueError:
-            return default
-        return default if (lo is not None and v < lo) else v
+        v = self._to_float(var.get())
+        return default if v is None or (lo is not None and v < lo) else v
 
     def _schedule(self, extract):
         if self._update_job is not None:
@@ -611,7 +858,8 @@ class SpectrumDigitizer:
 
     def build_output(self):
         """(grid, {name: values}) for all traces, or None if not computable."""
-        if self.xcal is None:
+        xcal, ycal = self.xcal, self.ycal
+        if xcal is None:
             return None
         step = self._num(self.v_step, 1.0, lo=1e-12)
         if step <= 0:
@@ -619,12 +867,12 @@ class SpectrumDigitizer:
         smooth = self._num(self.v_smooth, 0.0, lo=0)
         poly = int(self._num(self.v_poly, 3, lo=1))
         # An edge point is kept up to 2 px outside the data (the pixel size in X units).
-        tol = 2 * abs((self.xcal[1][1] - self.xcal[0][1]) / (self.xcal[1][0] - self.xcal[0][0]))
+        tol = 2 * abs((xcal[1][1] - xcal[0][1]) / (xcal[1][0] - xcal[0][0]))
         curves = []
         for t in self.traces:
             if len(t['xpx']) < 2:
                 continue
-            x, y = trace_values(t['xpx'], t['ypx'], self.xcal, self.ycal, t['zero'], t['roi'][3])
+            x, y = trace_values(t['xpx'], t['ypx'], xcal, ycal, t['zero'], t['roi'][3])
             curves.append((t['name'], x, y))
         if not curves:
             return None
@@ -645,6 +893,7 @@ class SpectrumDigitizer:
 
     # ---- drawing ----
     def _redraw(self):
+        self._update_job = None
         for a in self._overlay:
             try:
                 a.remove()
@@ -652,42 +901,46 @@ class SpectrumDigitizer:
                 pass
         self._overlay = []
         if self.rgb is None:
+            self._update_hint()
             return
         ax = self.ax_img
         H, W = self.rgb.shape[:2]
         sel = self._selected()
-        for kind, cal in (('x', self.xcal), ('y', self.ycal)):
-            if cal is None:
+        for key, p in self.cal_px.items():
+            if p is None:
                 continue
-            for p, v in cal:
-                self._overlay.append(ax.axvline(p, color='tab:blue', ls='--', lw=0.8) if kind == 'x'
-                                     else ax.axhline(p, color='tab:green', ls='--', lw=0.8))
-                self._overlay.append(ax.text(p if kind == 'x' else W * 0.005, H * 0.01 if kind == 'x' else p,
-                                             f"{v:g}", color='tab:blue' if kind == 'x' else 'tab:green',
-                                             fontsize=8, va='top' if kind == 'x' else 'bottom'))
-        for p, v in self._cal_pending:
-            line = ax.axvline(p, color='orange', ls=':') if self.mode == 'xcal' else ax.axhline(p, color='orange', ls=':')
-            self._overlay.append(line)
+            is_x = key[0] == 'x'
+            col = 'tab:blue' if is_x else 'tab:green'
+            active = self._nudge == ('cal', key)
+            lw = 1.4 if active else 0.8
+            if active:
+                col = 'darkorange'
+            ln = ax.axvline(p, color=col, ls='--', lw=lw) if is_x else ax.axhline(p, color=col, ls='--', lw=lw)
+            v = self.cal_var[key].get().strip()
+            lab = f"{key[0].upper()}{key[1]}" + (f" = {v}" if v else "")
+            txt = ax.text(p if is_x else 3, 3 if is_x else p, " " + lab, color=col, fontsize=9,
+                          fontweight='bold', va='top' if is_x else 'bottom', clip_on=True,
+                          ha='right' if key == 'x2' else 'left')
+            self._overlay += [ln, txt]
         for i, t in enumerate(self.traces):
             col = PALETTE[i % len(PALETTE)]
             x0, y0, x1, y1 = t['roi']
-            lw = 2.0 if t is sel else 0.8
-            r = Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, ec=col, lw=lw)
+            r = Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, ec=col, lw=2.0 if t is sel else 0.9)
             ax.add_patch(r)
             self._overlay.append(r)
             for ex in t['exclude']:
-                e = Rectangle((ex[0], ex[1]), ex[2] - ex[0], ex[3] - ex[1], fill=True, fc='gray',
-                              alpha=0.35, ec='gray', lw=0.5)
+                e = Rectangle((ex[0], ex[1]), ex[2] - ex[0], ex[3] - ex[1], fc='gray', alpha=0.35, ec='gray', lw=0.5)
                 ax.add_patch(e)
                 self._overlay.append(e)
             if t['zero'] is not None and self.ycal is None:
                 z, = ax.plot([x0, x1], [t['zero']] * 2, color=col, ls=':', lw=1)
                 self._overlay.append(z)
-            if len(t['xpx']):
-                ln, = ax.plot(t['xpx'], t['ypx'], '.', color='red', ms=2)
+            if self.v_points.get() and len(t['xpx']):
+                ln, = ax.plot(t['xpx'], t['ypx'], '.', color='red', ms=1.5, alpha=0.7)
                 self._overlay.append(ln)
         self.canvas.draw_idle()
         self._redraw_result()
+        self._update_hint()
 
     def _redraw_result(self):
         ax = self.ax_res
@@ -696,8 +949,8 @@ class SpectrumDigitizer:
         ax.grid(True, ls=':', alpha=0.5)
         out = self.build_output()
         if out is None:
-            msg = "Calibrate the X axis and add a trace to see the result here." if self.xcal is None or not self.traces \
-                else "No curve points found: adjust the box, the colour or the threshold."
+            msg = "Calibrate the X axis and add a curve: the result appears here." \
+                if self.xcal is None or not self.traces else "No curve points found."
             ax.text(0.5, 0.5, msg, ha='center', va='center', transform=ax.transAxes, fontsize=8, color='gray')
             self.info.config(text="")
         else:
@@ -710,7 +963,7 @@ class SpectrumDigitizer:
             ycal = "calibrated" if self.ycal is not None else \
                 ("normalized to the maximum" if self.v_norm.get() == 'max' else "pixels above the zero line")
             self.info.config(text=f"{len(grid)} points, X {grid[0]:g} .. {grid[-1]:g}; Y: {ycal}")
-        self.canvas.draw_idle()
+        self.canvas_res.draw_idle()
 
     # ---- dialogs ----
     def _ask_form(self, title, fields, width=24):
@@ -720,12 +973,14 @@ class SpectrumDigitizer:
         dlg.transient(self.root)
         out = []
         entries = []
+        first = None
         for label, initial in fields:
             tk.Label(dlg, text=label, anchor='w').pack(fill=tk.X, padx=12, pady=(10, 0))
             var = tk.StringVar(value=initial)
             e = tk.Entry(dlg, textvariable=var, width=width)
             e.pack(fill=tk.X, padx=12, pady=2)
             entries.append(var)
+            first = first or e
 
         def ok(*_):
             out.extend(v.get() for v in entries)
@@ -741,7 +996,8 @@ class SpectrumDigitizer:
         x = self.root.winfo_rootx() + (self.root.winfo_width() - dlg.winfo_reqwidth()) // 2
         y = self.root.winfo_rooty() + (self.root.winfo_height() - dlg.winfo_reqheight()) // 3
         dlg.geometry(f"+{max(x, 0)}+{max(y, 0)}")
-        dlg.winfo_children()[1].focus_set()
+        first.focus_set()
+        first.select_range(0, tk.END)
         dlg.grab_set()
         self.root.wait_window(dlg)
         return out if out else None
@@ -751,11 +1007,11 @@ class SpectrumDigitizer:
         if not self._need_image():
             return
         if self.xcal is None:
-            messagebox.showwarning("Export CSV", "Calibrate the X axis first.")
+            messagebox.showwarning("Export CSV", "Calibrate the X axis first (step 1).")
             return
         out = self.build_output()
         if out is None:
-            messagebox.showwarning("Export CSV", "No curve points to export: add a trace first.")
+            messagebox.showwarning("Export CSV", "No curve points to export: add a curve first (step 2).")
             return
         grid, cols = out
         default = os.path.splitext(os.path.basename(self.image_path))[0] + ".csv"
@@ -765,13 +1021,14 @@ class SpectrumDigitizer:
         if not path:
             return
         # Comma-separated with the X values in the first column: the layout LabSpectrumManager's
-        # generic CSV reader expects; empty cells where a trace has no data.
+        # generic CSV reader expects; empty cells where a curve has no data.
         with open(path, 'w', newline='', encoding='utf-8') as f:
             wr = csv.writer(f)
             wr.writerow(['X'] + list(cols))
             for i, x in enumerate(grid):
                 wr.writerow([f"{x:.6g}"] + ["" if np.isnan(c[i]) else f"{c[i]:.6g}" for c in cols.values()])
-        self._set_status(f"Saved {os.path.basename(path)} ({len(grid)} points, {len(cols)} trace(s)).")
+        self._set_status(f"Saved {os.path.basename(path)} ({len(grid)} points, {len(cols)} curve(s)).", ok=True,
+                         sticky=True)
 
 
 if __name__ == "__main__":

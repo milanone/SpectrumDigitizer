@@ -22,7 +22,9 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
 ## Key decisions
 
 - **Coordinates:** everything is in image pixel coordinates (pixel centres at integers, as `imshow`
-  shows them); calibrations are two points (pixel, value) per axis, linear, so reversed axes work.
+  shows them). Calibration = two points per axis (`cal_px`: clicked pixel, `cal_var`: typed value);
+  `xcal`/`ycal` are properties built from them (None until usable), so editing a value in the panel
+  updates everything. Linear, so reversed axes work.
 - **Traces** (`self.traces`, dicts): `roi` box, optional `color` (None = dark pixels), `zero` (pixel row),
   `exclude` boxes, and the cached extracted points `xpx`/`ypx`. `_extract_all()` re-extracts (after a
   change of threshold, colour or box); `_redraw()` only rebuilds the output (step, smoothing,
@@ -31,10 +33,22 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   calibrated and global to all traces.
 - **Output grid** = integer multiples of the step spanning all traces (`make_grid`: no accumulated
   floating-point drift); a trace gets NaN (empty cell) more than 2 pixels (in X units) outside its data.
-- **Mode handling:** `self.mode` selects what a canvas click or box means. `_toolbar_off()` switches off
-  matplotlib's pan/zoom before entering a mode, because an active toolbar tool silently swallows canvas
-  clicks (same pitfall as in LabSpectrumManager's deconvolution). The `RectangleSelector` is only active
-  in the `roi`/`excl` modes.
+- **Navigation and tools:** no matplotlib toolbar. Its pan/zoom tools swallow canvas clicks (the cause of
+  "I cannot calibrate": a user zooming with the toolbar after pressing Calibrate got no points), so the
+  view is moved directly: wheel = zoom at the cursor, left drag (when no tool is waiting) or middle/right
+  drag = pan. `self.mode` ('pick', 'color', 'zero', 'roi', 'excl') says what a click/box means; the
+  `RectangleSelector` is active only in 'roi'/'excl'; Esc cancels. The magnifier is a Tk label updated
+  from `_on_motion`.
+- **Arrow keys:** `self._nudge` = ('cal', key) or ('zero', trace) is the point the arrows move (set after a
+  pick, when a calibration box gets focus, after 'Set zero line'; cleared by Esc or a new tool). The arrow
+  bindings are on the root window and ignore Listbox/Combobox/Text focus, so the value boxes (entries)
+  lose arrow-key cursor movement on purpose: after a pick the focus is in the value box.
+- **Layout:** image and result preview are two canvases in a vertical `PanedWindow` (draggable sash).
+- **Status box:** `_update_hint()` derives the next step from the state; `_set_status(..., sticky=True)`
+  keeps a one-off message until the user edits something (`_sticky`).
+- **Image display:** default matplotlib interpolation, `adjustable='box'` (with 'datalim' matplotlib
+  warns about fixed limits on every zoom); never draw over the image more than thin overlays (box,
+  calibration lines, small red points, toggled by a checkbox).
 - **CSV format** is the one LabSpectrumManager's generic reader expects (`pd.read_csv(path,
   index_col=0)`: comma, X first). Do not switch to `;` without changing that reader.
 - **PlotStyleKit is not used:** the figure is a working view of an image, not a publication plot.
@@ -42,10 +56,11 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
 ## Verified / not verified
 
 Verified on the synthetic figure (`examples/example_two_panels.png`, made by `examples/make_example.py`):
-auto-detect panels, extraction of a continuous and a dotted curve against the ground truth, manual X
-calibration with simulated clicks, CSV export, and reading that CSV back in LabSpectrumManager
+auto-detect panels, extraction of a continuous and a dotted curve against the ground truth, and the manual
+workflow driven with real Tk mouse events (`event_generate` on the canvas: wheel zoom, pan, picking axis
+points, drawing a box, ignoring an area, Y calibration, Esc), CSV export, and reading that CSV back in LabSpectrumManager
 (File → Open: two spectra, UV-Vis, NaN rows dropped). NOT verified: real publication figures, JPEG/scans,
-coloured curves on real images, Y calibration on real images, box drawing with a real mouse.
+coloured curves on real images, Y calibration on real images, a physical mouse on screen (the events were injected, not clicked by a person).
 
 ## Editing conventions
 
