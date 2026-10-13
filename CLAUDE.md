@@ -31,6 +31,11 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   normalization). Parameter changes are debounced (`_schedule`).
 - **Y without calibration** is pixels above the trace's zero line; with a Y calibration it is
   calibrated and global to all traces.
+- **Frame lines in the box:** `extract_points()` removes rows/columns that are dark over >= 70 % of the
+  box (ruling lines, also when the curve touches them: otherwise frame and curve are one blob and every
+  column yields several points, which showed up as 'noise' in the preview), drops everything outside a
+  frame line within 15 % of the box border (ticks), and `one_point_per_column()` resolves any remaining
+  column with several points by continuity. Tests: `FrameInsideBoxTests`.
 - **Output grid** = integer multiples of the step spanning all traces (`make_grid`: no accumulated
   floating-point drift); a trace gets NaN (empty cell) more than 2 pixels (in X units) outside its data.
 - **Navigation and tools:** no matplotlib toolbar. Its pan/zoom tools swallow canvas clicks (the cause of

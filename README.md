@@ -61,6 +61,11 @@ treats the spectra as FTIR.
 
 - One curve per box: for overlapping curves of the same colour, draw one box per curve where they
   are separate, or distinguish them by colour. Curves that cross are not separated.
+- The box does not have to be tight: frame lines, ticks outside the frame and a panel letter inside the
+  box are ignored automatically (a row or column that is dark over 70 % of the box is taken for a
+  ruling line, and where several blobs give a point at the same X the one that continues the curve is
+  kept). The flip side: a **perfectly flat curve** covering more than 70 % of the box width is read as a
+  ruling line too; draw the box around the part that is not flat.
 - Each X position gets one point per curve (the centroid of its pixels): vertical segments of a curve
   are reduced to their midpoint, and the result is limited by the image resolution (about ±1 pixel).
 - Only linear axes. Anti-aliased/JPEG images work in principle; very low-resolution or heavily

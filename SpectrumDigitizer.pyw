@@ -9,6 +9,7 @@ automatically.
 The extraction functions at the top of the file do not need Tk, so the tests can import them.
 """
 import csv
+import re
 import os
 import sys
 
@@ -105,6 +106,30 @@ def extract_points(rgb, roi, color=None, thresh=128, tol=60, dot_max_frac=0.012,
         a, b = max(int(round(min(ey0, ey1))) - y0, 0), max(int(round(max(ey0, ey1))) - y0, 0)
         c, d = max(int(round(min(ex0, ex1))) - x0, 0), max(int(round(max(ex0, ex1))) - x0, 0)
         mask[a:b, c:d] = False
+    # Frame lines and grid lines inside the box: a row (column) that is dark over almost the whole box
+    # is a ruling line, not the curve. Removing it also detaches the curve where it touches the frame
+    # (otherwise the frame and the curve are one blob and every column gets a spurious point).
+    h, w = mask.shape
+    rule_rows = mask.sum(axis=1) >= 0.7 * w
+    rule_cols = mask.sum(axis=0) >= 0.7 * h
+    # Whatever lies outside a frame line near the border of the box (axis ticks, tick labels) is not
+    # the curve either.
+    for flags, axis in ((rule_cols, 1), (rule_rows, 0)):
+        idx = np.nonzero(flags)[0]
+        if len(idx) == 0:
+            continue
+        n = len(flags)
+        runs = groups(idx)
+        view = mask if axis == 0 else mask.T      # index along the axis being trimmed comes first
+        if runs[0][0] < 0.15 * n:
+            view[:runs[0][0], :] = False
+        if runs[-1][-1] > 0.85 * n:
+            view[runs[-1][-1] + 1:, :] = False
+    # one more row/column on each side: the anti-aliased edge of a ruling line
+    rule_rows = ndi.binary_dilation(rule_rows) if rule_rows.any() else rule_rows
+    rule_cols = ndi.binary_dilation(rule_cols) if rule_cols.any() else rule_cols
+    mask[rule_rows, :] = False
+    mask[:, rule_cols] = False
     lab, _ = ndi.label(mask)
     dot_max = dot_max_frac * W
     pts = []
@@ -125,8 +150,31 @@ def extract_points(rgb, roi, color=None, thresh=128, tol=60, dot_max_frac=0.012,
                 pts.append((x + x0, np.average(ys[m], weights=w[m]) + y0))
     if not pts:
         return np.array([]), np.array([])
-    pts = np.array(sorted(pts))
+    pts = one_point_per_column(np.array(sorted(pts)))
     return pts[:, 0], pts[:, 1]
+
+
+def one_point_per_column(pts):
+    """Several blobs can give a point at the same X (a panel letter, a tick, a second line crossing
+    the curve): keep, in those columns, the point closest to the nearest column that has a single
+    one, i.e. the one that continues the curve. `pts` is an (n, 2) array sorted by x."""
+    cols = np.round(pts[:, 0]).astype(int)
+    uniq, inv, counts = np.unique(cols, return_inverse=True, return_counts=True)
+    if (counts == 1).all():
+        return pts
+    single = counts[inv] == 1
+    if not single.any():  # every column is ambiguous: follow the median height
+        ref_x, ref_y = pts[:, 0], np.full(len(pts), np.median(pts[:, 1]))
+    else:
+        ref_x, ref_y = pts[single, 0], pts[single, 1]
+    keep = np.ones(len(pts), bool)
+    for col in uniq[counts > 1]:
+        idx = np.nonzero(cols == col)[0]
+        ref = ref_y[np.argmin(np.abs(ref_x - col))]
+        best = idx[np.argmin(np.abs(pts[idx, 1] - ref))]
+        keep[idx] = False
+        keep[best] = True
+    return pts[keep]
 
 
 def lin_map(cal, p):
@@ -405,10 +453,9 @@ class SpectrumDigitizer:
     # ---- calibration ----
     @staticmethod
     def _to_float(text):
-        try:
-            return float(text.strip().replace(',', '.'))
-        except ValueError:
-            return None
+        """Number at the start of the text; decimal comma accepted, a trailing unit ('400 nm') ignored."""
+        m = re.match(r'\s*([-+]?\d*[.,]?\d+(?:[eE][-+]?\d+)?)', text)
+        return float(m.group(1).replace(',', '.')) if m else None
 
     def _cal(self, axis):
         """((p1, v1), (p2, v2)) if the two points and values of the axis are usable, else None."""
@@ -417,6 +464,29 @@ class SpectrumDigitizer:
         if None in (p1, p2, v1, v2) or abs(p2 - p1) < 3 or v1 == v2:
             return None
         return (p1, v1), (p2, v2)
+
+    def missing_reason(self):
+        """Why there is no result yet, in words (None if there is one to compute)."""
+        if self.rgb is None:
+            return "No image loaded."
+        problems = []
+        for key in ('x1', 'x2'):
+            n = key[1]
+            if self.cal_px[key] is None:
+                problems.append(f"X point {n} is not picked on the image")
+            elif self._to_float(self.cal_var[key].get()) is None:
+                problems.append(f"X point {n} has no value (type a number in its box)")
+        if not problems:
+            if self.xcal is None:
+                problems.append("the two X points must be at different positions on the image, "
+                                "with different values")
+        if problems:
+            return "X axis not calibrated: " + "; ".join(problems) + "."
+        if not self.traces:
+            return "No curve yet: press 'Add curve' and drag a box around a curve."
+        if not any(len(t['xpx']) >= 2 for t in self.traces):
+            return "No curve points found inside the box: draw it again around the curve."
+        return None
 
     @property
     def xcal(self):
@@ -625,7 +695,7 @@ class SpectrumDigitizer:
         elif self.xcal is None:
             self._set_status("Step 1 - X axis: press 'Pick' next to 'X point 1', click on a tick of the X axis, "
                              "then type its value. Do the same for 'X point 2' on another tick, far from the first. "
-                             "(Wheel = zoom for precision.)")
+                             "(Wheel = zoom for precision.)\n" + self.missing_reason())
         elif not self.traces:
             self._set_status("Step 2 - press 'Add curve' and drag a box around one curve "
                              "(or try 'Auto-detect panels' for framed Origin-style plots).", ok=True)
@@ -903,6 +973,15 @@ class SpectrumDigitizer:
         if self.rgb is None:
             self._update_hint()
             return
+        try:
+            self._draw_overlays()
+        except Exception as e:  # keep the result plot alive and say what happened
+            self._set_status(f"Display error (the result below is still computed): {e}", sticky=True)
+        self.canvas.draw_idle()
+        self._redraw_result()
+        self._update_hint()
+
+    def _draw_overlays(self):
         ax = self.ax_img
         H, W = self.rgb.shape[:2]
         sel = self._selected()
@@ -938,20 +1017,23 @@ class SpectrumDigitizer:
             if self.v_points.get() and len(t['xpx']):
                 ln, = ax.plot(t['xpx'], t['ypx'], '.', color='red', ms=1.5, alpha=0.7)
                 self._overlay.append(ln)
-        self.canvas.draw_idle()
-        self._redraw_result()
-        self._update_hint()
 
     def _redraw_result(self):
+        try:
+            self._draw_result()
+        except Exception as e:
+            self._set_status(f"Result plot error: {e}", sticky=True)
+
+    def _draw_result(self):
         ax = self.ax_res
         ax.clear()
         ax.tick_params(labelsize=7)
         ax.grid(True, ls=':', alpha=0.5)
         out = self.build_output()
         if out is None:
-            msg = "Calibrate the X axis and add a curve: the result appears here." \
-                if self.xcal is None or not self.traces else "No curve points found."
-            ax.text(0.5, 0.5, msg, ha='center', va='center', transform=ax.transAxes, fontsize=8, color='gray')
+            msg = self.missing_reason() or "Nothing to show: check the X step (it must be a positive number)."
+            ax.text(0.5, 0.5, msg, ha='center', va='center', transform=ax.transAxes, fontsize=9,
+                    color='#aa0000', wrap=True)
             self.info.config(text="")
         else:
             grid, cols = out

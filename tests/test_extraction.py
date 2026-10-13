@@ -61,17 +61,17 @@ class HelperTests(unittest.TestCase):
 class ExtractionTests(unittest.TestCase):
     def test_coloured_curve_ignores_other_colours(self):
         img = np.full((100, 200, 3), 255.0)
-        img[50, 10:190] = (255, 160, 0)       # orange horizontal line
-        img[20, 10:190] = (0, 0, 0)         # black line that must be ignored
+        img[50, 10:120] = (255, 160, 0)       # orange horizontal line
+        img[20, 10:120] = (0, 0, 0)         # black line that must be ignored
         xs, ys = sd.extract_points(img, (0, 0, 200, 100), color=(255, 160, 0), tol=60)
-        self.assertEqual(len(xs), 180)
+        self.assertEqual(len(xs), 110)
         np.testing.assert_allclose(ys, 50.0)
         xs, ys = sd.extract_points(img, (0, 0, 200, 100))   # dark pixels: only the black line
         np.testing.assert_allclose(ys, 20.0)
 
     def test_exclude_box_removes_pixels(self):
         img = np.full((60, 120, 3), 255.0)
-        img[30, 10:110] = 0
+        img[30, 10:70] = 0
         xs, _ = sd.extract_points(img, (0, 0, 120, 60), exclude=[(0, 0, 50, 60)])
         self.assertGreaterEqual(xs.min(), 50)
 
@@ -87,6 +87,44 @@ class ExtractionTests(unittest.TestCase):
         xs, ys = sd.extract_points(img, (0, 0, 400, 80), dot_max_frac=0.03)
         np.testing.assert_allclose(xs, [50, 100, 150])
         np.testing.assert_allclose(ys, [40, 40, 40])
+
+
+class FrameInsideBoxTests(unittest.TestCase):
+    """A loosely drawn box includes the frame, ticks outside it and a panel letter: the result must
+    still be the curve alone, with exactly one point per column (several points per column made the
+    resampled curve jump up and down like noise)."""
+
+    @classmethod
+    def setUpClass(cls):
+        H, W = 400, 600
+        img = np.full((H, W, 3), 255.0)
+        img[40:43, 100:500] = 0          # top frame line
+        img[340:343, 100:500] = 0        # bottom frame line
+        img[40:343, 100:103] = 0         # left frame line
+        img[40:343, 497:500] = 0         # right frame line
+        img[300:302, 80:100] = 0         # zero tick outside the frame, left
+        img[343:355, 300:302] = 0        # axis tick below the frame
+        img[55:75, 120:130] = 0          # a panel letter
+        cls.x = np.arange(103, 497)
+        cls.y = 300 - 200 * np.exp(-0.5 * ((cls.x - 300) / 40.0) ** 2)   # a peak, touching the left frame
+        for xx, yy in zip(cls.x, cls.y):
+            img[int(round(yy)) - 1:int(round(yy)) + 1, xx] = 0
+        cls.img = img
+
+    def test_one_point_per_column_and_only_the_curve(self):
+        xs, ys = sd.extract_points(self.img, (60, 20, 540, 380))
+        cols = np.round(xs).astype(int)
+        self.assertEqual(len(cols), len(np.unique(cols)))
+        self.assertGreaterEqual(xs.min(), 100)       # nothing left of the frame (the zero tick)
+        self.assertLessEqual(xs.max(), 500)
+        truth = np.interp(xs, self.x, self.y)
+        inside = (xs > 110) & (xs < 490)
+        self.assertLess(np.max(np.abs(ys[inside] - truth[inside])), 2.0)
+
+    def test_one_point_per_column_helper(self):
+        pts = np.array([[1.0, 10.0], [2.0, 11.0], [2.0, 90.0], [3.0, 12.0]])
+        out = sd.one_point_per_column(pts)
+        np.testing.assert_allclose(out, [[1, 10], [2, 11], [3, 12]])
 
 
 @unittest.skipUnless(os.path.isfile(EXAMPLE), "example image missing")
