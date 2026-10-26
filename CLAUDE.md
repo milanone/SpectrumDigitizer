@@ -25,7 +25,7 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   shows them). Calibration = two points per axis (`cal_px`: clicked pixel, `cal_var`: typed value);
   `xcal`/`ycal` are properties built from them (None until usable), so editing a value in the panel
   updates everything. Linear, so reversed axes work.
-- **Traces** (`self.traces`, dicts): `roi` box, optional `color` (None = dark pixels), `zero` (pixel row),
+- **Traces** (`self.traces`, dicts): `roi` box, optional `color` (None = dark pixels, `'any'` = every non-white pixel, distance from white > the colour tolerance), `zero` (pixel row),
   `exclude` boxes, and the cached extracted points `xpx`/`ypx`. `_extract_all()` re-extracts (after a
   change of threshold, colour or box); `_redraw()` only rebuilds the output (step, smoothing,
   normalization). Parameter changes are debounced (`_schedule`).
@@ -48,6 +48,32 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   pick, when a calibration box gets focus, after 'Set zero line'; cleared by Esc or a new tool). The arrow
   bindings are on the root window and ignore Listbox/Combobox/Text focus, so the value boxes (entries)
   lose arrow-key cursor movement on purpose: after a pick the focus is in the value box.
+- **Colour filter** ('Erase colours' / 'Keep only colours', modes `erase`/`keep`): each click, or each small box dragged
+  with the `RectangleSelector` (a click is told from a drag on release by the display distance, <4 px;
+  `_pixel_colors()` merges the box's shades in steps of 16), appends an entry to `_filter_pts`; 'Apply' (`apply_filter()`) paints white the
+  pixels within the colour tolerance of any of them (or all the others), inside `work_box` (the working area,
+  set first with 'Set working area', mode `work`; None = whole image), rotated about its centre by `v_angle` degrees
+  counter-clockwise (`_work_mask()`, `_work_corners()`; the angle resets when a new box is drawn). It replaces `self.rgb` (the old array
+  goes on `rgb_undo`; 'Undo' pops it) and re-extracts. Where another curve crosses the erased one it gets a gap.
+  `_cancel_tool` drops the pending clicks. 'Erase an area' (mode `wipe`) whitens a box with the same undo
+  stack: for legends, which 'Ignore an area' handles only per curve and after the box exists. Verified on
+  synthetic images only.
+- **Working-area handles** (no tool active, `mode is None`): `_work_hit()` tests, in display pixels, the round
+  rotation handle, the 8 square handles and then the inside (move); `_work_drag_to()` works in the local frame
+  of the unrotated box (`_to_local`/`_from_local`, the same convention as `_work_mask`) so resizing a rotated box
+  keeps the opposite edge fixed. A drag only redraws the overlays (`_refresh_overlay`); `_angle_busy` stops the
+  `v_angle` trace from doing a full `_redraw`. Because a press on a handle or inside the area starts a drag,
+  panning with the left button does not work over the area: right/middle drag pans.
+- **Flatten colours** (`flatten_colors()`): non-white pixels (distance from white > colour tolerance, inside the working
+  area) become black, undoable. Alternative to the trace mode `'any'`; flattening also changes the saved image.
+- **Eraser** (mode `brush`): press copies `self.rgb` onto `rgb_undo` (one undo step per stroke), motion stamps
+  white discs along the path (`_brush_stamp`), release re-extracts. Not clipped to the working area. The size
+  circle is a separate artist (`_brush_circle`), not part of `_overlay`.
+- **Inner ticks:** after the ruling lines are blanked, `strip_inner_ticks()` erases the stubs pointing from a
+  ruling line into the box (a bundle of at most ~1 % of the image width of adjacent columns/rows with a run of
+  2..tick_max pixels starting at the rule and clear flanks). A curve following the rule gives a wide group and is
+  left alone. Tests: `InnerTickTests` (thick ticks, curve hugging the bottom frame). Checked on a real publication figure (not in the repo; ticks gone).
+- **Save Cleaned Image** writes `self.rgb` as PNG (lossless); the session (calibration, boxes) is not saved.
 - **Layout:** image and result preview are two canvases in a vertical `PanedWindow` (draggable sash).
 - **Status box:** `_update_hint()` derives the next step from the state; `_set_status(..., sticky=True)`
   keeps a one-off message until the user edits something (`_sticky`).

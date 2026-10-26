@@ -24,7 +24,7 @@ import matplotlib
 matplotlib.use('TkAgg')
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Circle, Polygon, Rectangle
 from matplotlib.widgets import RectangleSelector
 
 try:
@@ -79,13 +79,49 @@ def find_zero(dark, left, top, bottom):
 def curve_mask(crop, color, tol, thresh):
     """Boolean mask of the curve pixels in an RGB crop, plus a per-pixel weight for centroids.
 
-    color=None selects dark pixels (gray < thresh); otherwise pixels whose RGB distance from
-    `color` is below `tol`."""
+    color=None selects dark pixels (gray < thresh); color='any' every pixel that is not white (RGB
+    distance from white above `tol`: a trace of mixed shades, e.g. after the image was cleaned);
+    otherwise pixels whose RGB distance from `color` is below `tol`."""
+    if isinstance(color, str) and color == 'any':
+        dist = np.sqrt(((255.0 - crop) ** 2).sum(axis=2))
+        return dist > tol, dist / 441.7 + 0.05
     if color is None:
         gray = crop @ np.array([0.299, 0.587, 0.114])
         return gray < thresh, 255.0 - gray
     dist = np.sqrt(((crop - np.asarray(color, float)) ** 2).sum(axis=2))
     return dist < tol, (1.0 - dist / tol) + 0.05
+
+
+def strip_inner_ticks(mask, rule_flags, axis, max_width=4):
+    """Erase, in place, the axis ticks that point from a ruling line into the box.
+
+    `rule_flags` marks the (dilated) ruling rows (axis=0) or columns (axis=1) already blanked in `mask`.
+    From each side of a ruling line, a tick is a bundle of at most `max_width` adjacent lines (tick thickness grows with the image size) (columns for a
+    horizontal rule) whose run of mask pixels, starting right at the rule, is 2..tick_max long. A curve
+    that follows the rule gives such runs in every column (wide group): it is left alone."""
+    view = mask if axis == 0 else mask.T        # rule lines are rows of `view`
+    n, m = view.shape
+    tick_max = max(10, int(0.05 * min(mask.shape)))
+    for run in groups(np.nonzero(rule_flags)[0]):
+        for step, start in ((1, run[-1] + 1), (-1, run[0] - 1)):
+            lengths = np.zeros(m, int)
+            for k in range(tick_max + 1):
+                r = start + step * k
+                if r < 0 or r >= n:
+                    break
+                alive = view[r, :] & (lengths == k)
+                lengths[alive] += 1
+            cand = np.nonzero((lengths >= 2) & (lengths <= tick_max))[0]
+            for g in groups(cand):
+                if len(g) > max_width:
+                    continue
+                lo, hi = g[0], g[-1]
+                flank = np.r_[lengths[max(lo - 2, 0):lo], lengths[hi + 1:hi + 3]]
+                if len(flank) and flank.max() >= 2:
+                    continue            # neighbours also have pixels there: part of a curve, not a stub
+                for c in g:
+                    rs = [start + step * k for k in range(lengths[c])]
+                    view[rs, c] = False
 
 
 def extract_points(rgb, roi, color=None, thresh=128, tol=60, dot_max_frac=0.012, exclude=()):
@@ -130,6 +166,10 @@ def extract_points(rgb, roi, color=None, thresh=128, tol=60, dot_max_frac=0.012,
     rule_cols = ndi.binary_dilation(rule_cols) if rule_cols.any() else rule_cols
     mask[rule_rows, :] = False
     mask[:, rule_cols] = False
+    # Ticks pointing into the box (inner ticks) would otherwise be taken for dots or bend the curve.
+    tick_w = max(4, int(0.01 * W))
+    strip_inner_ticks(mask, rule_rows, 0, tick_w)
+    strip_inner_ticks(mask, rule_cols, 1, tick_w)
     lab, _ = ndi.label(mask)
     dot_max = dot_max_frac * W
     pts = []
@@ -254,7 +294,19 @@ class SpectrumDigitizer:
         self.cal_px = {k: None for k in ('x1', 'x2', 'y1', 'y2')}
         self.cal_var = {k: tk.StringVar() for k in self.cal_px}
         self.traces = []          # dicts: name, roi, color, zero, exclude, xpx, ypx
-        self.mode = None          # 'pick' | 'color' | 'zero' | 'roi' | 'excl' | None
+        self.mode = None          # 'pick' | 'color' | 'zero' | 'roi' | 'excl' | 'erase' | 'keep' | None
+        self.rgb_undo = []        # previous states of self.rgb (colour filter), newest last
+        self.im = None            # the AxesImage showing self.rgb
+        self.work_box = None      # working area (x0, y0, x1, y1) the colour filter is limited to; None = whole image
+        self._brush_last = None   # last point of the eraser stroke in progress (image coordinates), else None
+        self._brush_circle = None # circle showing the eraser size under the cursor
+        self.v_brush = tk.StringVar(value='6')   # eraser diameter, image pixels
+        self._work_drag = None    # drag of a working-area handle in progress: dict(name, sx, sy, frame, p0)
+        self._work_cursor = ''    # cursor currently set by hovering over a handle
+        self._angle_busy = False  # True while a drag sets v_angle (the trace must not redraw everything)
+        self.v_angle = tk.StringVar(value='0')   # rotation of the working area about its centre, degrees counter-clockwise
+        self._filter_pts = []     # clicks / small boxes collected for the next erase/keep: dicts (box or x, y; colors)
+        self._press_xy = None     # (display x, y, data x, y) of a press in an erase/keep mode, to tell click from drag
         self._pick_key = None
         self._overlay = []
         self._update_job = None
@@ -267,6 +319,8 @@ class SpectrumDigitizer:
         menu = tk.Menu(root)
         fm = tk.Menu(menu, tearoff=0)
         fm.add_command(label="Open Image...", command=self.open_dialog)
+        fm.add_command(label="Close Image", command=self.close_image)
+        fm.add_command(label="Save Cleaned Image...", command=self.save_image)
         fm.add_command(label="Export CSV...", command=self.export_csv)
         fm.add_separator()
         fm.add_command(label="Exit", command=root.destroy)
@@ -312,7 +366,7 @@ class SpectrumDigitizer:
                        ('motion_notify_event', self._on_motion), ('scroll_event', self._on_scroll)):
             self.canvas.mpl_connect(ev, fn)
         self.selector = RectangleSelector(self.ax_img, self._on_rect, useblit=True, button=[1],
-                                          interactive=False, minspanx=3, minspany=3,
+                                          interactive=False, minspanx=4, minspany=4, spancoords='pixels',
                                           props=dict(facecolor='none', edgecolor='red', linestyle='--'))
         self.selector.set_active(False)
         paned.add(f_plot, width=980)
@@ -396,12 +450,47 @@ class SpectrumDigitizer:
         tk.Button(row, text="Pick its colour", command=lambda: self._start_point('color')).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         tk.Button(row, text="Black curve", command=self.use_dark).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(row, text="Any colour", command=self.use_any).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         row = tk.Frame(parent, bg=bg)
         row.pack(fill=tk.X, padx=10, pady=(2, 0))
         tk.Button(row, text="Ignore an area", command=lambda: self._start_rect('excl')).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         tk.Button(row, text="Set zero line", command=lambda: self._start_point('zero')).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        # optional clean-up of the image by colour
+        tk.Label(parent, text="Clean the image (optional): working area, then colours:", bg=bg, fg='#555555',
+                 font=('Arial', 8), anchor='w').pack(fill=tk.X, padx=10, pady=(4, 0))
+        row = tk.Frame(parent, bg=bg)
+        row.pack(fill=tk.X, padx=10)
+        tk.Button(row, text="Set working area", command=lambda: self._start_rect('work')).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(row, text="Whole image", command=self.clear_work_box).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(row, text="Erase an area", command=lambda: self._start_rect('wipe')).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        row = tk.Frame(parent, bg=bg)
+        row.pack(fill=tk.X, padx=10, pady=(2, 0))
+        tk.Label(row, text="Rotate the working area (°, counter-clockwise):", bg=bg, anchor='w',
+                 font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
+        tk.Spinbox(row, from_=-180, to=180, increment=0.5, width=6, textvariable=self.v_angle,
+                   command=self._redraw).pack(side=tk.LEFT)
+        self.v_angle.trace_add('write', lambda *_: None if self._angle_busy else self._redraw())
+        row = tk.Frame(parent, bg=bg)
+        row.pack(fill=tk.X, padx=10, pady=(2, 0))
+        tk.Button(row, text="Erase colours", command=lambda: self._start_filter('erase')).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(row, text="Keep only colours", command=lambda: self._start_filter('keep')).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        self.apply_btn = tk.Button(row, text="Apply", command=self.apply_filter, state=tk.DISABLED)
+        self.apply_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(row, text="Undo", command=self.undo_filter).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        row = tk.Frame(parent, bg=bg)
+        row.pack(fill=tk.X, padx=10, pady=(2, 0))
+        tk.Button(row, text="Eraser (paint white)", command=self._start_brush).pack(side=tk.LEFT, padx=2)
+        tk.Label(row, text="size (px)", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=(6, 2))
+        tk.Spinbox(row, from_=1, to=200, increment=1, width=5, textvariable=self.v_brush).pack(side=tk.LEFT)
+        tk.Button(row, text="Flatten colours", command=self.flatten_colors).pack(side=tk.LEFT, padx=(10, 2))
 
         # 3. output
         tk.Label(parent, text="3. OUTPUT", font=('Arial', 10, 'bold'), bg=bg, anchor='w').pack(
@@ -531,6 +620,9 @@ class SpectrumDigitizer:
         self.image_path = path
         self.pil = img
         self.rgb = np.asarray(img, dtype=float)
+        self.rgb_undo = []
+        self.work_box = None
+        self.v_angle.set('0')
         self.traces = []
         for axis in ('x', 'y'):
             for key in (axis + '1', axis + '2'):
@@ -540,8 +632,9 @@ class SpectrumDigitizer:
         self._nudge = None
         self._cancel_tool()
         self.ax_img.clear()
+        self._brush_circle = None
         # The image is shown as it is (default interpolation: no pixel dropping when zoomed out).
-        self.ax_img.imshow(self.rgb.astype(np.uint8))
+        self.im = self.ax_img.imshow(self.rgb.astype(np.uint8))
         self.ax_img.set_aspect('equal', adjustable='box')
         self.ax_img.set_axis_off()
         self._overlay = []
@@ -549,6 +642,46 @@ class SpectrumDigitizer:
         self._refresh_list()
         self._fit_view()
         self._redraw()
+
+    def save_image(self):
+        """Save the image as it is now (after erasing / keeping colours and areas) as a lossless PNG."""
+        if not self._need_image():
+            return
+        base = os.path.splitext(os.path.basename(self.image_path))[0] + "_clean.png"
+        path = filedialog.asksaveasfilename(
+            title="Save cleaned image", defaultextension=".png", initialfile=base,
+            initialdir=os.path.dirname(self.image_path), filetypes=[("PNG image", "*.png")])
+        if not path:
+            return
+        try:
+            Image.fromarray(self.rgb.astype(np.uint8)).save(path)
+        except Exception as e:
+            messagebox.showerror("Save cleaned image", f"Cannot save the image:\n{e}")
+            return
+        self._set_status(f"Cleaned image saved: {path}. Open it later with File → Open Image.", ok=True, sticky=True)
+
+    def close_image(self):
+        """Back to the empty start state: no image, calibration, curves or filter history."""
+        if self.rgb is None:
+            return
+        self.image_path = self.pil = self.rgb = self.im = None
+        self.rgb_undo = []
+        self.work_box = None
+        self.v_angle.set('0')
+        self.traces = []
+        for key in self.cal_px:
+            self.cal_px[key] = None
+            self.cal_var[key].set('')
+        self._update_px_labels()
+        self._nudge = None
+        self._last_xy = None
+        self._overlay = []
+        self._cancel_tool(keep_status=True)
+        self._refresh_list()
+        self._show_empty()
+        self.root.title("Spectrum Digitizer")
+        self._sticky = False
+        self._update_hint()
 
     def _show_empty(self):
         self.ax_img.clear()
@@ -590,6 +723,11 @@ class SpectrumDigitizer:
         if self.rgb is None or event.inaxes is not self.ax_img or event.xdata is None:
             return
         ax = self.ax_img
+        if event.button == 1 and self.mode is None and self.work_box is not None:
+            h = self._work_hit(event)
+            if h is not None:
+                self._start_work_drag(h, event)
+                return
         # Drag = move the image, unless a tool is waiting for a click/box (then only the
         # right and middle buttons move it).
         if event.button in (2, 3) or (event.button == 1 and self.mode is None):
@@ -622,6 +760,15 @@ class SpectrumDigitizer:
             self._cancel_tool(keep_status=True)
             self._set_status(f"Curve colour set to RGB {tr['color']}.", ok=True, sticky=True)
             self._extract_all()
+        elif self.mode == 'brush':
+            self.rgb_undo.append(self.rgb)       # one undo step per stroke
+            self.rgb = self.rgb.copy()
+            self._brush_last = (x, y)
+            self._brush_stamp(x, y, x, y)
+        elif self.mode in ('erase', 'keep'):
+            # A click adds one colour, a drag (the RectangleSelector) adds all the colours inside the box:
+            # which one it is is known only on release.
+            self._press_xy = (event.x, event.y, x, y)
         elif self.mode == 'zero':
             tr = self._selected()
             tr['zero'] = float(y)
@@ -630,7 +777,45 @@ class SpectrumDigitizer:
             self._set_status("Zero line set: fine-tune it with the ↑↓ keys (Shift = finer).", ok=True, sticky=True)
             self._redraw()
 
+    def _add_filter_colors(self, entry):
+        """Add a click or a sampled box to the pending colour filter and refresh the status."""
+        self._filter_pts.append(entry)
+        self.apply_btn.config(state=tk.NORMAL, text=f"Apply ({len(self._filter_pts)})")
+        verb = 'erase' if self.mode == 'erase' else 'keep'
+        self._set_status(f"{len(self._filter_pts)} selection(s) to {verb}. Click a pixel or drag a small box over "
+                         "the trace to add its colours, then press 'Apply'. Esc cancels.")
+        self._redraw()
+
+    def _pixel_colors(self, crop):
+        """Distinct colours of an RGB crop, ignoring (near) white and merging close shades (steps of 16
+        levels): a few tens at most, so 'Apply' stays fast even for a box with thousands of JPEG shades."""
+        px = crop.reshape(-1, 3)
+        px = px[px.min(axis=1) <= 235]
+        if len(px) == 0:
+            return []
+        q = np.unique((px // 16).astype(int), axis=0) * 16 + 8
+        return [tuple(int(v) for v in c) for c in q]
+
     def _on_release(self, event):
+        if self._brush_last is not None:
+            self._brush_last = None
+            self._extract_all()
+            return
+        if self._work_drag is not None:
+            self._work_drag = None
+            self.canvas.get_tk_widget().config(cursor='')
+            self._work_cursor = ''
+            self._redraw()
+            return
+        press, self._press_xy = self._press_xy, None
+        if press is not None and self.mode in ('erase', 'keep') and event.button == 1                 and abs(event.x - press[0]) < 4 and abs(event.y - press[1]) < 4:
+            H, W = self.rgb.shape[:2]
+            x, y = press[2], press[3]
+            px = self.rgb[min(max(int(round(y)), 0), H - 1), min(max(int(round(x)), 0), W - 1)]
+            if px.min() > 235:
+                self._set_status("That pixel is white: click right on the trace.")
+            else:
+                self._add_filter_colors(dict(x=x, y=y, colors=[tuple(int(v) for v in px)]))
         if self._pan is not None:
             self._pan = None
             self.canvas.get_tk_widget().config(cursor='crosshair' if self.mode else '')
@@ -638,6 +823,21 @@ class SpectrumDigitizer:
     def _on_motion(self, event):
         if self.rgb is None:
             return
+        if self._work_drag is not None:
+            self._work_drag_to(event)
+            return
+        if self.mode == 'brush' and self._pan is None:
+            x, y = self.ax_img.transData.inverted().transform((event.x, event.y))
+            if self._brush_last is not None:
+                self._brush_stamp(*self._brush_last, x, y)
+                self._brush_last = (x, y)
+            self._move_brush_circle(x, y)
+        if self.mode is None and self._pan is None and self.work_box is not None:
+            h = self._work_hit(event) if event.inaxes is self.ax_img else None
+            cur = '' if h is None else {'rot': 'exchange', 'size': 'sizing', 'move': 'fleur'}[h[0]]
+            if cur != self._work_cursor:
+                self._work_cursor = cur
+                self.canvas.get_tk_widget().config(cursor=cur)
         if self._pan is not None:
             x0, y0, xlim, ylim = self._pan
             bb = self.ax_img.get_window_extent()
@@ -707,6 +907,17 @@ class SpectrumDigitizer:
                              "adjust step / smoothing if needed, then press 'Export CSV'.", ok=True)
 
     def _cancel_tool(self, keep_status=False):
+        self._brush_last = None
+        if self._brush_circle is not None:
+            try:
+                self._brush_circle.remove()
+            except Exception:
+                pass
+            self._brush_circle = None
+            self.canvas.draw_idle()
+        if self._filter_pts:
+            self._filter_pts = []
+            self.apply_btn.config(state=tk.DISABLED, text="Apply")
         self.mode = None
         self._pick_key = None
         self.selector.set_active(False)
@@ -781,6 +992,11 @@ class SpectrumDigitizer:
         self.canvas.get_tk_widget().config(cursor='crosshair')
         self._set_status("Drag a box around the curve: include only the curve, leave out axis labels, "
                          "legends and panel letters. Esc cancels." if purpose == 'roi' else
+                         "Drag a box over what must be removed from the image (a legend, a panel letter...): "
+                         "it is painted white, for all curves. 'Undo' restores it. Esc cancels."
+                         if purpose == 'wipe' else
+                         "Drag the working area: the colour filter will act only inside it. Esc cancels."
+                         if purpose == 'work' else
                          "Drag a box over what the selected curve must ignore (a panel letter, a legend...). "
                          "Esc cancels.")
 
@@ -795,11 +1011,284 @@ class SpectrumDigitizer:
         self._set_status("Click on a pixel of the curve (not on a white pixel). Esc cancels." if kind == 'color'
                          else "Click on the zero level of this curve (Y = height above that line). Esc cancels.")
 
+    # ---- eraser (hand refinement) ----
+    def _start_brush(self):
+        if not self._need_image():
+            return
+        self._cancel_tool(keep_status=True)
+        self._nudge = None
+        self.mode = 'brush'
+        self.canvas.get_tk_widget().config(cursor='crosshair')
+        self._set_status("Eraser: drag over what must go (it is painted white); the circle shows the size, set it "
+                         "in 'size (px)'. One 'Undo' takes back a whole stroke. Right/middle drag moves the "
+                         "image. Esc ends.")
+
+    def _brush_diameter(self):
+        return max(1.0, self._to_float(self.v_brush.get()) or 1.0)
+
+    def _brush_stamp(self, x0, y0, x1, y1):
+        """Paint white a disc of the eraser size along the segment (x0, y0)-(x1, y1), image coordinates."""
+        r = self._brush_diameter() / 2
+        H, W = self.rgb.shape[:2]
+        n = max(int(np.hypot(x1 - x0, y1 - y0) / max(r / 2, 0.5)), 1)
+        for t in np.linspace(0, 1, n + 1):
+            cx, cy = x0 + (x1 - x0) * t, y0 + (y1 - y0) * t
+            xa, xb = max(int(np.floor(cx - r)), 0), min(int(np.ceil(cx + r)) + 1, W)
+            ya, yb = max(int(np.floor(cy - r)), 0), min(int(np.ceil(cy + r)) + 1, H)
+            if xa >= xb or ya >= yb:
+                continue
+            yy, xx = np.mgrid[ya:yb, xa:xb]
+            self.rgb[ya:yb, xa:xb][(xx - cx) ** 2 + (yy - cy) ** 2 <= r * r + 0.25] = 255.0
+        self.im.set_data(self.rgb.astype(np.uint8))
+        self.canvas.draw_idle()
+
+    def _move_brush_circle(self, x, y):
+        r = self._brush_diameter() / 2
+        if self._brush_circle is None:
+            self._brush_circle = Circle((x, y), r, fill=False, ec='magenta', lw=1.0)
+            self.ax_img.add_patch(self._brush_circle)
+        self._brush_circle.set_center((x, y))
+        self._brush_circle.set_radius(r)
+        self.canvas.draw_idle()
+
+    def _start_filter(self, kind):
+        if not self._need_image():
+            return
+        self._cancel_tool(keep_status=True)
+        self._nudge = None
+        self.mode = kind
+        self.selector.set_active(True)
+        self.canvas.get_tk_widget().config(cursor='crosshair')
+        where = "inside the working area" if self.work_box else "in the whole image"
+        self._set_status(("Click on the trace colour(s) to ERASE" if kind == 'erase' else
+                          "Click on the trace colour(s) to KEEP (everything else becomes white)")
+                         + f", {where}: click a pixel, or drag a small box over the trace to take all the "
+                         "colours inside it; repeat if needed, then press 'Apply'. Esc cancels.")
+
+    def _work_angle(self):
+        return self._to_float(self.v_angle.get()) or 0.0
+
+    def _work_corners(self):
+        """Corners (4 x 2, in image pixels) of the working area: the box rotated about its centre."""
+        x0, y0, x1, y1 = self.work_box
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        t = np.radians(self._work_angle())
+        c, sn = np.cos(t), np.sin(t)
+        out = []
+        for u, v in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
+            u, v = u - cx, v - cy
+            out.append((cx + u * c + v * sn, cy - u * sn + v * c))   # y points down: counter-clockwise on screen
+        return np.array(out)
+
+    def _work_mask(self, shape):
+        """Boolean mask of the working area (the whole image if there is none)."""
+        if self.work_box is None:
+            return np.ones(shape, bool)
+        x0, y0, x1, y1 = self.work_box
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        t = np.radians(self._work_angle())
+        yy, xx = np.mgrid[:shape[0], :shape[1]]
+        dx, dy = xx - cx, yy - cy
+        u = dx * np.cos(t) - dy * np.sin(t)       # pixel position in the frame of the unrotated box
+        v = dx * np.sin(t) + dy * np.cos(t)
+        return (np.abs(u) <= (x1 - x0) / 2 + 0.5) & (np.abs(v) <= (y1 - y0) / 2 + 0.5)
+
+    # ---- working-area handles: move (drag inside), resize (8 square handles), rotate (round handle) ----
+    def _work_frame(self):
+        x0, y0, x1, y1 = self.work_box
+        return (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2, (y1 - y0) / 2, np.radians(self._work_angle())
+
+    @staticmethod
+    def _to_local(x, y, frame):
+        """Image point -> (u, v) in the frame of the unrotated box, origin at its centre."""
+        cx, cy, _, _, t = frame
+        dx, dy = x - cx, y - cy
+        return dx * np.cos(t) - dy * np.sin(t), dx * np.sin(t) + dy * np.cos(t)
+
+    @staticmethod
+    def _from_local(u, v, frame):
+        cx, cy, _, _, t = frame
+        return cx + u * np.cos(t) + v * np.sin(t), cy - u * np.sin(t) + v * np.cos(t)
+
+    def _px_scale(self):
+        """Screen pixels per image pixel at the current zoom."""
+        tr = self.ax_img.transData
+        return abs(tr.transform((1, 0))[0] - tr.transform((0, 0))[0]) or 1.0
+
+    def _work_handles(self):
+        """[(name, sx, sy, x, y)] in image coordinates; the rotation handle sits 28 screen px above the top edge."""
+        fr = self._work_frame()
+        hw, hh = fr[2], fr[3]
+        out = [('rot', 0, -2, *self._from_local(0, -hh - 28 / self._px_scale(), fr))]
+        for sx, sy in ((-1, -1), (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0)):
+            out.append(('size', sx, sy, *self._from_local(sx * hw, sy * hh, fr)))
+        return out
+
+    def _work_hit(self, event):
+        """Handle under the mouse: a _work_handles() tuple, ('move', 0, 0, x, y) inside the area, or None."""
+        if self.work_box is None:
+            return None
+        tr = self.ax_img.transData
+        for h in self._work_handles():
+            hx, hy = tr.transform((h[3], h[4]))
+            if np.hypot(hx - event.x, hy - event.y) <= 9:
+                return h
+        fr = self._work_frame()
+        x, y = tr.inverted().transform((event.x, event.y))
+        u, v = self._to_local(x, y, fr)
+        if abs(u) <= fr[2] and abs(v) <= fr[3]:
+            return ('move', 0, 0, x, y)
+        return None
+
+    def _start_work_drag(self, h, event):
+        p0 = self.ax_img.transData.inverted().transform((event.x, event.y))
+        self._work_drag = dict(name=h[0], sx=h[1], sy=h[2], frame=self._work_frame(), p0=tuple(p0))
+        self.canvas.get_tk_widget().config(cursor='fleur')
+
+    def _work_drag_to(self, event):
+        d = self._work_drag
+        x, y = self.ax_img.transData.inverted().transform((event.x, event.y))
+        cx, cy, hw, hh, t = d['frame']
+        if d['name'] == 'move':
+            dx, dy = x - d['p0'][0], y - d['p0'][1]
+            self.work_box = (cx - hw + dx, cy - hh + dy, cx + hw + dx, cy + hh + dy)
+        elif d['name'] == 'rot':
+            ang = np.degrees(np.arctan2(-(x - cx), -(y - cy)))
+            if event.key == 'shift':
+                ang = round(ang / 15) * 15
+            self._angle_busy = True
+            self.v_angle.set(f"{round(float(ang), 1):g}")
+            self._angle_busy = False
+        else:
+            u, v = self._to_local(x, y, d['frame'])
+            u0, u1, v0, v1 = -hw, hw, -hh, hh      # the edge opposite to the handle stays where it is
+            if d['sx'] == 1:
+                u1 = max(u, u0 + 4)
+            elif d['sx'] == -1:
+                u0 = min(u, u1 - 4)
+            if d['sy'] == 1:
+                v1 = max(v, v0 + 4)
+            elif d['sy'] == -1:
+                v0 = min(v, v1 - 4)
+            ncx, ncy = self._from_local((u0 + u1) / 2, (v0 + v1) / 2, d['frame'])
+            nhw, nhh = (u1 - u0) / 2, (v1 - v0) / 2
+            self.work_box = (ncx - nhw, ncy - nhh, ncx + nhw, ncy + nhh)
+        self._refresh_overlay()
+
+    def _refresh_overlay(self):
+        """Redraw only the overlays (cheap enough to follow a handle drag)."""
+        for a in self._overlay:
+            try:
+                a.remove()
+            except Exception:
+                pass
+        self._overlay = []
+        if self.rgb is not None:
+            self._draw_overlays()
+            self.canvas.draw_idle()
+
+    def clear_work_box(self):
+        self.work_box = None
+        self.v_angle.set('0')
+        self._set_status("Working area removed: the colour filter acts on the whole image.", ok=True, sticky=True)
+        self._redraw()
+
+    def apply_filter(self):
+        """Paint white the pixels within the colour tolerance of any clicked colour (erase) or all the
+        others (keep), inside the working area (or the whole image). Undoable."""
+        pts, keep = list(self._filter_pts), self.mode == 'keep'
+        if not pts or self.mode not in ('erase', 'keep'):
+            return
+        self._cancel_tool(keep_status=True)
+        tol = self._num(self.v_tol, 60.0, lo=1)
+        near = np.zeros(self.rgb.shape[:2], bool)
+        colors = {c for e in pts for c in e['colors']}
+        for c in colors:
+            near |= np.sqrt(((self.rgb - np.asarray(c, float)) ** 2).sum(axis=2)) < tol
+        hit = ~near if keep else near
+        hit &= self._work_mask(hit.shape)
+        n = int(hit.sum())
+        if n == 0:
+            self._set_status("No pixel changed.", sticky=True)
+            self._redraw()
+            return
+        self.rgb_undo.append(self.rgb)
+        self.rgb = self.rgb.copy()
+        self.rgb[hit] = 255.0
+        self.im.set_data(self.rgb.astype(np.uint8))
+        self._set_status(f"{'Kept only' if keep else 'Erased'} {len(colors)} colour(s) (tolerance {tol:g}): "
+                         f"{n} pixels made white. 'Undo' restores the previous image.", ok=True, sticky=True)
+        self._extract_all()
+
+    def flatten_colors(self):
+        """Turn every non-white pixel (distance from white above the colour tolerance) of the working area, or
+        of the whole image, into pure black: a trace drawn in several shades becomes one colour, which the
+        default 'Black curve' detection follows entirely. Undoable; kept by 'Save Cleaned Image'."""
+        if not self._need_image():
+            return
+        self._cancel_tool(keep_status=True)
+        tol = self._num(self.v_tol, 60.0, lo=1)
+        hit = np.sqrt(((255.0 - self.rgb) ** 2).sum(axis=2)) > tol
+        hit &= self._work_mask(hit.shape)
+        hit &= self.rgb.sum(axis=2) > 0          # already black: nothing to do
+        n = int(hit.sum())
+        if n == 0:
+            self._set_status("No pixel to flatten.", sticky=True)
+            return
+        self.rgb_undo.append(self.rgb)
+        self.rgb = self.rgb.copy()
+        self.rgb[hit] = 0.0
+        self.im.set_data(self.rgb.astype(np.uint8))
+        self._set_status(f"{n} non-white pixels made black (tolerance {tol:g} from white). Pale pixels closer to "
+                         "white are left as they are; lower the tolerance to include them. 'Undo' restores.",
+                         ok=True, sticky=True)
+        self._extract_all()
+
+    def undo_filter(self):
+        if not self.rgb_undo:
+            self._set_status("Nothing to undo.", sticky=True)
+            return
+        self.rgb = self.rgb_undo.pop()
+        self.im.set_data(self.rgb.astype(np.uint8))
+        self._set_status("Colour filter undone.", ok=True, sticky=True)
+        self._extract_all()
+
     def _on_rect(self, eclick, erelease):
-        if self.mode not in ('roi', 'excl') or eclick.xdata is None or erelease.xdata is None:
+        if self.mode not in ('roi', 'excl', 'wipe', 'work', 'erase', 'keep') or eclick.xdata is None or erelease.xdata is None:
             return
         box = (min(eclick.xdata, erelease.xdata), min(eclick.ydata, erelease.ydata),
                max(eclick.xdata, erelease.xdata), max(eclick.ydata, erelease.ydata))
+        if self.mode in ('erase', 'keep'):
+            H, W = self.rgb.shape[:2]
+            x0, y0 = max(int(round(box[0])), 0), max(int(round(box[1])), 0)
+            x1, y1 = min(int(round(box[2])) + 1, W), min(int(round(box[3])) + 1, H)
+            self.selector.set_visible(False)
+            colors = self._pixel_colors(self.rgb[y0:y1, x0:x1])
+            if not colors:
+                self._set_status("That box is all white: drag it over the trace.")
+            else:
+                self._add_filter_colors(dict(box=box, colors=colors))
+            return
+        if self.mode == 'work':
+            self.work_box = box
+            self.v_angle.set('0')
+            self._cancel_tool(keep_status=True)
+            self._set_status("Working area set: 'Erase colours' / 'Keep only colours' now act only inside it.",
+                             ok=True, sticky=True)
+            self._redraw()
+            return
+        if self.mode == 'wipe':
+            H, W = self.rgb.shape[:2]
+            x0, y0 = max(int(round(box[0])), 0), max(int(round(box[1])), 0)
+            x1, y1 = min(int(round(box[2])) + 1, W), min(int(round(box[3])) + 1, H)
+            self.rgb_undo.append(self.rgb)
+            self.rgb = self.rgb.copy()
+            self.rgb[y0:y1, x0:x1] = 255.0
+            self.im.set_data(self.rgb.astype(np.uint8))
+            self._cancel_tool(keep_status=True)
+            self._set_status("Area painted white. 'Undo' restores it.", ok=True, sticky=True)
+            self._extract_all()
+            return
         if self.mode == 'roi':
             n = len(self.traces) + 1
             names = {t['name'] for t in self.traces}
@@ -854,6 +1343,18 @@ class SpectrumDigitizer:
         self.traces.remove(tr)
         self._refresh_list()
         self._redraw()
+
+    def use_any(self):
+        """The curve is everything that is not white (its shades differ: black, violet, pink...)."""
+        tr = self._selected()
+        if tr is None:
+            messagebox.showwarning("Spectrum Digitizer", "Add and select a curve first.")
+            return
+        tr['color'] = 'any'
+        self._extract_all()
+        self._set_status("The curve is now every non-white pixel in its box (the 'Colour tolerance' in the advanced "
+                         "settings is how far from white a pixel must be). Erase what is not the curve first.",
+                         ok=True, sticky=True)
 
     def use_dark(self):
         tr = self._selected()
@@ -1001,6 +1502,26 @@ class SpectrumDigitizer:
                           fontweight='bold', va='top' if is_x else 'bottom', clip_on=True,
                           ha='right' if key == 'x2' else 'left')
             self._overlay += [ln, txt]
+        if self.work_box is not None:
+            r = Polygon(self._work_corners(), closed=True, fill=False, ec='royalblue', ls='--', lw=1.2)
+            ax.add_patch(r)
+            self._overlay.append(r)
+            hs = self._work_handles()
+            rot, sizes = hs[0], hs[1:]
+            top = next(h for h in sizes if (h[1], h[2]) == (0, -1))
+            ln, = ax.plot([top[3], rot[3]], [top[4], rot[4]], color='royalblue', lw=1)
+            sq, = ax.plot([h[3] for h in sizes], [h[4] for h in sizes], 's', ms=6, mfc='white',
+                          mec='royalblue', mew=1.2)
+            rh, = ax.plot([rot[3]], [rot[4]], 'o', ms=7, mfc='white', mec='royalblue', mew=1.2)
+            self._overlay += [ln, sq, rh]
+        for e in self._filter_pts:
+            if 'box' in e:
+                b = e['box']
+                mk = Rectangle((b[0], b[1]), b[2] - b[0], b[3] - b[1], fill=False, ec='magenta', lw=1.2)
+                ax.add_patch(mk)
+            else:
+                mk, = ax.plot([e['x']], [e['y']], 'x', color='magenta', ms=8, mew=1.5)
+            self._overlay.append(mk)
         for i, t in enumerate(self.traces):
             col = PALETTE[i % len(PALETTE)]
             x0, y0, x1, y1 = t['roi']

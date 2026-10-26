@@ -182,3 +182,45 @@ class ExampleFigureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InnerTickTests(unittest.TestCase):
+    """Axis ticks pointing into the box must not become curve points, also where the curve hugs the
+    frame (a spectrum that falls to the baseline)."""
+
+    def test_inner_ticks_are_ignored(self):
+        H, W = 300, 500
+        img = np.full((H, W, 3), 255.0)
+        img[30:33, 50:450] = 0            # top frame
+        img[250:253, 50:450] = 0          # bottom frame
+        img[30:253, 50:53] = 0            # left frame
+        img[30:253, 447:450] = 0          # right frame
+        for x in range(80, 450, 40):      # inner ticks on the bottom frame, 8 px long
+            img[242:250, x:x + 2] = 0
+            img[33:41, x:x + 2] = 0       # and on the top frame
+        for y in range(60, 250, 40):      # inner ticks on the left frame
+            img[y:y + 5, 53:64] = 0     # thick ticks, as in a large figure
+        xs0 = np.arange(54, 446)
+        ys0 = 250 - 150 * np.exp(-0.5 * ((xs0 - 150) / 25.0) ** 2) - 0.0 * xs0
+        ys0 = np.where(xs0 > 300, 247.0, ys0)           # right part hugs the bottom frame
+        for xx, yy in zip(xs0, ys0):
+            img[int(round(yy)) - 1:int(round(yy)) + 1, xx] = 0
+        xs, ys = sd.extract_points(img, (40, 20, 460, 265))
+        cols = np.round(xs).astype(int)
+        self.assertEqual(len(cols), len(np.unique(cols)))
+        truth = np.interp(xs, xs0, ys0)
+        ok = (xs > 60) & (xs < 440)
+        self.assertLess(np.max(np.abs(ys[ok] - truth[ok])), 3.0)
+
+
+class AnyColourTests(unittest.TestCase):
+    def test_any_colour_follows_a_trace_of_mixed_shades(self):
+        img = np.full((100, 400, 3), 255.0)      # the trace spans < 70 % of the box: not taken for a ruling line
+        shades = [(0, 0, 0), (60, 60, 200), (200, 80, 220), (235, 170, 240)]
+        for k, x0 in enumerate(range(20, 260, 60)):
+            img[50:52, x0:x0 + 60] = shades[k % 4]          # one horizontal trace, four shades
+        xs, ys = sd.extract_points(img, (0, 0, 400, 100), color='any', tol=40)
+        self.assertEqual(len(xs), 240)
+        np.testing.assert_allclose(ys, 50.5, atol=0.1)
+        xs, _ = sd.extract_points(img, (0, 0, 400, 100))    # dark pixels only: black and blue, not the pale shades
+        self.assertEqual(len(xs), 120)
