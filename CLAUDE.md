@@ -140,6 +140,12 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   `_guide_state` and the undo/redo also keep `(xpx, ypx, fixed)`, so Ctrl+Z in the Digitize tab undoes both. Modifier keys are read
   from the Tk event state (`_mods`): matplotlib's `event.key` is only set if the canvas had the keyboard focus. The session stores
   `fixed` + `points`. The Digitize tab is a scrollable frame (`_scrollable`: canvas + scrollbar shown only when needed).
+- **Analysis** (Output tab, `compute_analysis()` switches `self._analysis` on): `curve_metrics()` (core, no Tk) on the output grid values:
+  trapezoid area, peak, length, limits interpolated, optional straight baseline between the limits. `_draw_result` re-runs
+  `_run_analysis` on every redraw (live) and `_plot_result` shades the area with `fill_between`. Pixel length is the polyline of
+  the extracted points between the limits. PlotDigitizer's 'polygon area' is covered by the baseline option (peak area above the
+  line between two limits); closed polygons of clicks are not implemented. Verified on a Gaussian peak on a slope: area within
+  0.6 % of the analytic value, with and without baseline.
 - **Number arrows** in the Output tab: `_make_spin()` is a `tk.Spinbox` with Tk's own increment set to 0 and the
   command registered with `%d` ('up'/'down'); `_spin_move()` computes the new value (X step: 1-2-5 sequence; window:
   one X step; polynomial order: 1..9). Works with the mouse, press-and-hold and the Up/Down keys. Also used for the advanced

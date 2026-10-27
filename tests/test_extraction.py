@@ -391,3 +391,34 @@ class LogAxisTests(unittest.TestCase):
         np.testing.assert_allclose(sd.log_ticks(0.8, 12000.0), [1, 10, 100, 1000, 10000])       # > 4 decades: powers only
         np.testing.assert_allclose(sd.log_ticks(3, 400), [5, 10, 20, 50, 100, 200])             # 2 decades: 1, 2, 5
         self.assertEqual(len(sd.log_ticks(-1, 10)), 0)                                          # no log scale below 0
+
+
+class CurveMetricsTests(unittest.TestCase):
+    def test_area_peak_and_length_of_a_triangle(self):
+        m = sd.curve_metrics([0, 1, 2], [0, 1, 0])
+        self.assertAlmostEqual(m['area'], 1.0)
+        self.assertAlmostEqual(m['peak_x'], 1.0)
+        self.assertAlmostEqual(m['peak_height'], 1.0)
+        self.assertAlmostEqual(m['length'], 2 * np.sqrt(2))
+
+    def test_limits_are_interpolated(self):
+        m = sd.curve_metrics([0, 1, 2], [0, 1, 0], lo=0.5, hi=1.5)       # limits not on the data points
+        np.testing.assert_allclose(m['xs'], [0.5, 1.0, 1.5])
+        self.assertAlmostEqual(m['area'], 0.75)
+
+    def test_straight_baseline_is_subtracted(self):
+        x = np.linspace(0, 10, 101)
+        y = 2 + 0.5 * x + np.exp(-((x - 5) / 1.0) ** 2)                   # a Gaussian peak on a slope
+        plain = sd.curve_metrics(x, y)['area']
+        m = sd.curve_metrics(x, y, baseline=True)
+        self.assertAlmostEqual(m['area'], np.sqrt(np.pi), delta=0.01)      # the Gaussian alone (limits far in its tails)
+        self.assertAlmostEqual(plain - m['area'], 45.0, delta=0.05)       # what lies under the baseline: 2*10 + 0.5*10^2/2
+        self.assertAlmostEqual(m['peak_x'], 5.0, delta=0.11)
+        self.assertAlmostEqual(sd.curve_metrics(x, 0.5 * x, baseline=True)['area'], 0.0, places=9)
+
+    def test_nan_and_degenerate_input(self):
+        m = sd.curve_metrics([0, 1, 2, 3], [0, np.nan, 2, 3])
+        self.assertAlmostEqual(m['area'], 4.5)                             # the NaN point is skipped, not zero
+        self.assertIsNone(sd.curve_metrics([0, 1], [1, 1], lo=5, hi=6))
+        self.assertIsNone(sd.curve_metrics([0.0], [1.0]))
+        self.assertIsNone(sd.curve_metrics([0, 1, 2], [1, 1, 1], lo=2, hi=1))

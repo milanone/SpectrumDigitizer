@@ -52,6 +52,7 @@ def _system_decimal():
             pass
 
 
+ALL_CURVES = '(all curves)'
 SESSION_EXT = '.sdsession'   # a zip: session.json + image.png
 SESSION_VERSION = 1
 PALETTE = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd', '#8c564b', '#e377c2', '#17becf']
@@ -404,6 +405,33 @@ def make_grid(lo, hi, step):
     return np.arange(n0, n1 + 1) * step
 
 
+def curve_metrics(x, y, lo=None, hi=None, baseline=False):
+    """Area, peak and length of the curve y(x) between `lo` and `hi` (None: the ends of the data); NaN values are
+    ignored and the limits are interpolated, so they need not be on the grid. With `baseline` the straight line
+    between the curve's values at the two limits is subtracted first (area and peak above that line).
+    Returns None if fewer than two points or an empty range. The area is the trapezoid integral of y dx; the
+    length is the sum of the segments, in the (mixed) units of the two axes."""
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    x, y = x[ok], y[ok]
+    if len(x) < 2:
+        return None
+    order = np.argsort(x)
+    x, y = x[order], y[order]
+    a = x[0] if lo is None else max(float(lo), x[0])
+    b = x[-1] if hi is None else min(float(hi), x[-1])
+    if not b > a:
+        return None
+    xs = np.r_[a, x[(x > a) & (x < b)], b]
+    ys = np.interp(xs, x, y)
+    base = np.interp(xs, [a, b], [ys[0], ys[-1]]) if baseline else np.zeros_like(ys)
+    yb = ys - base
+    k = int(np.argmax(yb))
+    return dict(lo=float(a), hi=float(b), area=float(np.sum((yb[1:] + yb[:-1]) * np.diff(xs)) / 2),
+                peak_x=float(xs[k]), peak_y=float(ys[k]), peak_height=float(yb[k]),
+                length=float(np.sum(np.hypot(np.diff(xs), np.diff(ys)))), xs=xs, ys=ys, base=base)
+
+
 def log_ticks(lo, hi):
     """Values of the check grid on a logarithmic axis: every power of ten, with 2 and 5 when the range is under
     4 decades, with 1..9 under 2 decades; ascending, inside [lo, hi]."""
@@ -486,6 +514,12 @@ class SpectrumDigitizer:
         self._pdrag = None        # a drag in progress in the points mode: dict(kind='move'|'pull'|'box', ...)
         self._pt_cursor = ''
         self.v_bwidth = tk.StringVar(value='14')   # brush width of the semi-automatic tracing, image pixels
+        self.v_an_curve = tk.StringVar(value=ALL_CURVES)   # analysis: which curve
+        self.v_an_lo = tk.StringVar(value='')              # analysis: X limits (empty = the ends of the data)
+        self.v_an_hi = tk.StringVar(value='')
+        self.v_an_base = tk.BooleanVar(value=False)        # analysis: subtract a straight baseline between the limits
+        self._analysis = None     # when set (the Compute button), recomputed and shaded on every redraw of the result
+        self._analysis_shapes = []
         self.v_speck = tk.StringVar(value='6')     # despeckle: blobs with fewer pixels than this are removed
         self.v_grid = tk.BooleanVar(value=False)   # draw the check grid of the calibration over the image
         self.v_xlog = tk.BooleanVar(value=False)   # the X axis of the plot is logarithmic
@@ -630,8 +664,8 @@ class SpectrumDigitizer:
         t_dig_outer, t_dig = self._scrollable(self.nb, bg)
         self.nb.add(t_clean, text="  Clean image  ")
         self.nb.add(t_dig_outer, text="  Digitize  ")
-        t_out = tk.Frame(self.nb, bg=bg)
-        self.nb.add(t_out, text="  Output  ")
+        t_out_outer, t_out = self._scrollable(self.nb, bg)
+        self.nb.add(t_out_outer, text="  Output  ")
         self.nb.bind('<<NotebookTabChanged>>', lambda e: self._on_tab_changed())
 
         # 1. axes
@@ -867,6 +901,32 @@ class SpectrumDigitizer:
         tk.Checkbutton(t_out, text="decimal comma (Excel with an Italian/European setup)", variable=self.v_comma,
                        bg=bg, font=('Arial', 8), anchor='w').pack(fill=tk.X, padx=10)
 
+        # Analysis: area, peak and length of a curve between two X values (the table's own values)
+        ab = tk.LabelFrame(t_out, text=" Analysis: area, peak, length ", bg=bg, font=('Arial', 9, 'bold'), fg='#1f4e79',
+                           bd=2, relief=tk.GROOVE, padx=8, pady=6)
+        ab.pack(fill=tk.X, padx=10, pady=(10, 4))
+        tk.Label(ab, text="Curve", bg=bg, font=('Arial', 9)).grid(row=0, column=0, sticky='w')
+        self.cb_an = ttk.Combobox(ab, textvariable=self.v_an_curve, values=[ALL_CURVES], width=16, state='readonly')
+        self.cb_an.grid(row=0, column=1, columnspan=3, sticky='w', padx=6, pady=2)
+        tk.Label(ab, text="from X", bg=bg, font=('Arial', 9)).grid(row=1, column=0, sticky='w')
+        self._make_spin(ab, self.v_an_lo, 'xlim').grid(row=1, column=1, padx=6, pady=2)
+        tk.Label(ab, text="to X", bg=bg, font=('Arial', 9)).grid(row=1, column=2, sticky='w')
+        self._make_spin(ab, self.v_an_hi, 'xlim').grid(row=1, column=3, padx=6)
+        tk.Checkbutton(ab, text="subtract a straight baseline between the two limits", variable=self.v_an_base,
+                       bg=bg, font=('Arial', 8), command=self._compute_analysis_if_on).grid(
+            row=2, column=0, columnspan=4, sticky='w')
+        tk.Label(ab, text="Empty limits = the whole curve. The values are those of the table (after smoothing and "
+                 "normalization).", bg=bg, fg='#777777', font=('Arial', 8), justify='left', wraplength=330).grid(
+            row=3, column=0, columnspan=4, sticky='w')
+        brow = tk.Frame(ab, bg=bg)
+        brow.grid(row=4, column=0, columnspan=4, sticky='w', pady=(4, 0))
+        tk.Button(brow, text="Compute", command=self.compute_analysis, bg='#c8e6c9').pack(side=tk.LEFT, padx=2)
+        tk.Button(brow, text="Clear", command=self.clear_analysis).pack(side=tk.LEFT, padx=2)
+        tk.Button(brow, text="Copy result", command=self.copy_analysis).pack(side=tk.LEFT, padx=2)
+        self.l_analysis = tk.Label(ab, text="", bg=bg, font=('Consolas', 8), fg='#333333', justify='left',
+                                   anchor='w', wraplength=340)
+        self.l_analysis.grid(row=5, column=0, columnspan=4, sticky='w', pady=(4, 0))
+
     def _make_spin(self, parent, var, kind):
         """Entry with up/down arrows (also the arrow keys and press-and-hold) for a number of the Output tab.
         The step depends on the field: 'step' walks the 1-2-5 sequence (0.5, 1, 2, 5, 10...), 'window' moves by
@@ -891,6 +951,14 @@ class SpectrumDigitizer:
             new = max(0.0, (x or 0.0) + direction * inc)
         elif kind == 'order':
             new = min(9, max(1, int(round(x or 3)) + direction))
+        elif kind == 'xlim':                           # an X limit of the analysis, kept inside the data
+            out = self.build_output()
+            if out is None:
+                return
+            g = out[0]
+            x = (g[0] if direction > 0 else g[-1]) if x is None else x
+            new = x * 10 ** (direction * self._x_step()) if self.v_xlog.get() else x + direction * (g[-1] - g[0]) / 100
+            new = min(max(new, g[0]), g[-1])
         else:                                          # simple bounded numbers: (min, max, increment)
             lo, hi, inc = {'thresh': (0, 255, 5), 'tol': (1, 441, 5), 'bwidth': (2, 200, 2), 'dot': (0.1, 50, 0.1),
                            'reach': (10, 400, 10), 'speck': (1, 500, 1),
@@ -1088,7 +1156,8 @@ class SpectrumDigitizer:
         return dict(step=self.v_step, smooth=self.v_smooth, poly=self.v_poly, norm=self.v_norm, points=self.v_points,
                     thresh=self.v_thresh, tol=self.v_tol, dot=self.v_dot, brush_width=self.v_bwidth,
                     brush_reach=self.v_reach, eraser=self.v_brush, xlog=self.v_xlog, ylog=self.v_ylog,
-                    ppd=self.v_ppd)
+                    ppd=self.v_ppd, an_curve=self.v_an_curve, an_lo=self.v_an_lo, an_hi=self.v_an_hi,
+                    an_base=self.v_an_base)
 
     def save_session(self, ask=False):
         """One file (a zip): session.json with the calibration, curves, brush paths, working area and settings,
@@ -2899,6 +2968,13 @@ class SpectrumDigitizer:
 
     def _draw_result(self):
         out = self.build_output()
+        names = [ALL_CURVES] + [t['name'] for t in self.traces]
+        self.cb_an.config(values=names)
+        if self.v_an_curve.get() not in names:
+            self.v_an_curve.set(ALL_CURVES)
+        self._analysis_shapes = self._run_analysis(out)
+        if self._analysis is not None:
+            self.l_analysis.config(text=self._analysis_text(self._analysis_shapes))
         self._plot_result(self.ax_res, out, big=False)
         self.canvas_res.draw_idle()
         if self._view_is_result():        # the large plot is drawn only while it is shown
@@ -2909,6 +2985,73 @@ class SpectrumDigitizer:
         else:
             grid, cols = out
             self.info.config(text=f"{len(grid)} points, X {grid[0]:g} .. {grid[-1]:g}; Y: {self._y_description()}")
+
+    def compute_analysis(self):
+        """Switch the analysis on with the limits typed in its box; it is then recomputed (and the area shaded on the
+        result plot) whenever the result changes."""
+        lo, hi = self._to_float(self.v_an_lo.get()), self._to_float(self.v_an_hi.get())
+        if lo is not None and hi is not None and hi <= lo:
+            messagebox.showwarning("Analysis", "'to X' must be larger than 'from X'.")
+            return
+        if self.build_output() is None:
+            messagebox.showwarning("Analysis", self.missing_reason() or "Nothing to analyse yet.")
+            return
+        self._analysis = dict(lo=lo, hi=hi)
+        self._redraw_result()
+
+    def _compute_analysis_if_on(self):
+        if self._analysis is not None:
+            self._redraw_result()
+
+    def clear_analysis(self):
+        self._analysis = None
+        self._analysis_shapes = []
+        self.l_analysis.config(text="")
+        self._redraw_result()
+
+    def _run_analysis(self, out):
+        """[(trace index, name, metrics, pixel length)] for the curve(s) chosen, with the limits of the analysis."""
+        if self._analysis is None or out is None:
+            return []
+        grid, cols = out
+        want = self.v_an_curve.get()
+        res = []
+        for i, t in enumerate(self.traces):
+            if t['name'] not in cols or want not in (ALL_CURVES, t['name']):
+                continue
+            mt = curve_metrics(grid, cols[t['name']], self._analysis['lo'], self._analysis['hi'],
+                               self.v_an_base.get())
+            if mt is None:
+                continue
+            xc = self.xcal
+            plo, phi = sorted(float(xc.to_pixel(v)) for v in (mt['lo'], mt['hi']))
+            sel = (t['xpx'] >= plo) & (t['xpx'] <= phi)
+            order = np.argsort(t['xpx'][sel])
+            px = t['xpx'][sel][order], t['ypx'][sel][order]
+            res.append((i, t['name'], mt, float(np.sum(np.hypot(np.diff(px[0]), np.diff(px[1]))))))
+        return res
+
+    def _analysis_text(self, shapes):
+        if not shapes:
+            return "Nothing to analyse: no such curve, or the limits are outside it."
+        base = self.v_an_base.get()
+        lines = [f"Y: {self._y_description()}" + (" | baseline subtracted" if base else "")]
+        for _, name, mt, plen in shapes:
+            lines.append(f"{name}: X {mt['lo']:.6g} .. {mt['hi']:.6g}")
+            lines.append(f"   area  {mt['area']:.6g}  (Y x X units)")
+            lines.append(f"   peak  {mt['peak_height']:.6g} at X = {mt['peak_x']:.6g}" +
+                         (f"  (curve value {mt['peak_y']:.6g})" if base else ""))
+            lines.append(f"   length {mt['length']:.6g} in axis units (X and Y mixed), {plen:.1f} px on the image")
+        return "\n".join(lines)
+
+    def copy_analysis(self):
+        text = self.l_analysis.cget('text')
+        if not text:
+            self._set_status("Press 'Compute' first.", sticky=True)
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text + "\n")
+        self._set_status("Analysis result copied.", ok=True, sticky=True)
 
     def _y_description(self):
         if self.ycal is not None:
@@ -2932,6 +3075,11 @@ class SpectrumDigitizer:
         for i, t in enumerate(self.traces):
             if t['name'] in cols:
                 ax.plot(grid, cols[t['name']], color=PALETTE[i % len(PALETTE)], lw=1.6 if big else 1, label=t['name'])
+        for i, _, mt, _ in self._analysis_shapes:                  # the integrated area, shaded
+            col = PALETTE[i % len(PALETTE)]
+            ax.fill_between(mt['xs'], mt['base'], mt['ys'], color=col, alpha=0.25, lw=0)
+            if self.v_an_base.get():
+                ax.plot(mt['xs'], mt['base'], '--', color=col, lw=0.8)
         if big:
             ax.set_xlabel("X", fontsize=11)
             ax.set_ylabel(f"Y ({self._y_description()})", fontsize=11)
