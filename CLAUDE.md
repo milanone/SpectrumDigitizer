@@ -163,6 +163,12 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   index_col=0)`: comma, X first). Do not switch to `;` without changing that reader.
 - **PlotStyleKit is not used:** the figure is a working view of an image, not a publication plot.
 
+## Icon
+
+`SpectrumDigitizer.ico` (16, 24, 32, 48 and 64 px, each shrunk by hand from a 1024 px drawing, written as classic 32-bit BMP frames by `write_ico()`: Pillow's own ICO writer makes PNG-compressed frames, which XYplorer's toolbar button does not read) is made by `python examples/make_icon.py` (white tile with black axes and an orange curve; `blue` and `light` are other styles); the program loads it
+with `iconbitmap(default=...)` inside a try, so a missing file or another platform just keeps the default icon. To use it for a
+shortcut, point the shortcut's icon at this file.
+
 ## Screenshots
 
 `screenshot.png`, `screenshot_clean.png` and `screenshot_result.png` come from the real window on the synthetic
@@ -172,12 +178,25 @@ the three images before publishing: the title bar shows only the example file na
 
 ## Verified / not verified
 
-Verified on the synthetic figure (`examples/example_two_panels.png`, made by `examples/make_example.py`):
-auto-detect panels, extraction of a continuous and a dotted curve against the ground truth, and the manual
-workflow driven with real Tk mouse events (`event_generate` on the canvas: wheel zoom, pan, picking axis
-points, drawing a box, ignoring an area, Y calibration, Esc), CSV export, and reading that CSV back in LabSpectrumManager
-(File → Open: two spectra, UV-Vis, NaN rows dropped). NOT verified: real publication figures, JPEG/scans,
-coloured curves on real images, Y calibration on real images, a physical mouse on screen (the events were injected, not clicked by a person).
+Verified with real Tk events injected on the canvas (`event_generate`: clicks, drags, wheel, keys) and with
+synthetic images whose truth is known (`examples/example_two_panels.png`, plus plots drawn in the tests and in
+throw-away scripts): auto-detect panels, extraction of continuous and dotted curves against the ground truth, calibration
+(linear; logarithmic X, Y and both, errors of about one pixel), the brush (drawing, resuming, pulling a stretch, crossing
+curves, a curve falling onto the axis), hand-edited points, the clean-up tools (colours, working area and handles, eraser,
+despeckle, straighten a 7° tilt, crop, flatten, undo/redo), sessions (save, reopen: identical image, points and CSV),
+the area/peak analysis (a Gaussian peak: 0.6 % from the analytic area), CSV export, and reading that CSV back in
+LabSpectrumManager (File → Open: two spectra, UV-Vis, NaN rows dropped).
+
+On one real publication figure (not in the repo; a four-curve absorption spectrum as JPG, then a cleaned PNG of it): the inner
+ticks are ignored, the brush follows a black curve that turns violet and pale pink and falls onto the x axis (without
+taking the axis for the curve; the last ~20 nm, where the curve is inside the axis line, are lost), and 'Flatten colours' /
+'Any colour' give the same points.
+
+NOT verified: a physical mouse on screen (the events were injected, not clicked by a person); other real figures and scans
+(JPEG artefacts, low resolution, grids, coloured curves, dotted curves on real images); Y calibration and logarithmic axes on
+real plots; hand-edited points and the analysis on real data; any comparison of the digitized values with another
+digitizer's (PlotDigitizer) on the same figure; the layout on a small or high-DPI screen (the Digitize and Output tabs scroll when
+they do not fit); the screenshot script on anything but Windows 11.
 
 ## Editing conventions
 

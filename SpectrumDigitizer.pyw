@@ -483,6 +483,10 @@ class SpectrumDigitizer:
     def __init__(self, root):
         self.root = root
         root.title("Spectrum Digitizer")
+        try:                       # the window and taskbar icon; without the file (or off Windows) the default stays
+            root.iconbitmap(default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'SpectrumDigitizer.ico'))
+        except Exception:
+            pass
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         w, h = min(1400, int(sw * 0.92)), min(880, int(sh * 0.85))
         root.geometry(f"{w}x{h}+{(sw - w) // 2}+{max((sh - h) // 3, 0)}")

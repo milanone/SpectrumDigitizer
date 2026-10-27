@@ -168,6 +168,8 @@ pip install -r requirements.txt
 pythonw SpectrumDigitizer.pyw [image]
 ```
 
+`SpectrumDigitizer.ico` is the window and taskbar icon (drawn by `examples/make_icon.py`); the program runs without it.
+
 Python 3 with Tkinter, numpy, scipy, Pillow, matplotlib; `tkinterdnd2` is optional (drag and drop).
 
 ## Tests
