@@ -468,7 +468,7 @@ class SpectrumDigitizer:
         self.cal_px = {k: None for k in ('x1', 'x2', 'y1', 'y2')}
         self.cal_var = {k: tk.StringVar() for k in self.cal_px}
         self.traces = []          # dicts: name, roi, color, zero, exclude, xpx, ypx
-        self.mode = None          # 'pick' | 'color' | 'zero' | 'roi' | 'excl' | 'erase' | 'keep' | 'brush' | 'straighten' | 'guide' | None
+        self.mode = None          # 'pick' | 'color' | 'zero' | 'roi' | 'excl' | 'erase' | 'keep' | 'brush' | 'straighten' | 'guide' | 'points' | None
         self.rgb_undo = []        # previous states of self.rgb (colour filter), newest last
         self.rgb_redo = []        # states undone, newest last; emptied by any new edit
         self.session_path = None  # file of the session in use (File > Save Session), else None
@@ -481,6 +481,10 @@ class SpectrumDigitizer:
         self._guide_hist = []     # snapshots for the brush 'Undo'
         self._guide_redo = []     # states undone, for the brush 'Redo'; emptied by a new brush edit
         self._guide_cursor = ''
+        self._pt_target = None    # curve whose extracted points are being edited by hand (mode 'points')
+        self._pt_sel = None       # index of the selected point of that curve
+        self._pdrag = None        # a drag in progress in the points mode: dict(kind='move'|'pull'|'box', ...)
+        self._pt_cursor = ''
         self.v_bwidth = tk.StringVar(value='14')   # brush width of the semi-automatic tracing, image pixels
         self.v_speck = tk.StringVar(value='6')     # despeckle: blobs with fewer pixels than this are removed
         self.v_grid = tk.BooleanVar(value=False)   # draw the check grid of the calibration over the image
@@ -525,6 +529,8 @@ class SpectrumDigitizer:
         for key, redo in (('<Control-z>', False), ('<Control-y>', True), ('<Control-Z>', True)):
             root.bind(key, lambda e, redo=redo: self._on_ctrl_z(e, redo))
         root.bind('<Control-s>', lambda e: self.save_session())
+        for key in ('<Delete>', '<BackSpace>'):
+            root.bind(key, lambda e: self._on_delete_key(e))
         root.bind('<Control-o>', lambda e: self.open_session_dialog())
         root.bind('<Home>', lambda e: None if isinstance(e.widget, (tk.Entry, tk.Spinbox, tk.Text, ttk.Combobox))
                   else self._fit_view())
@@ -621,9 +627,9 @@ class SpectrumDigitizer:
         self.nb = ttk.Notebook(parent)
         self.nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=(8, 0))
         t_clean = tk.Frame(self.nb, bg=bg)
-        t_dig = tk.Frame(self.nb, bg=bg)
+        t_dig_outer, t_dig = self._scrollable(self.nb, bg)
         self.nb.add(t_clean, text="  Clean image  ")
-        self.nb.add(t_dig, text="  Digitize  ")
+        self.nb.add(t_dig_outer, text="  Digitize  ")
         t_out = tk.Frame(self.nb, bg=bg)
         self.nb.add(t_out, text="  Output  ")
         self.nb.bind('<<NotebookTabChanged>>', lambda e: self._on_tab_changed())
@@ -689,6 +695,13 @@ class SpectrumDigitizer:
             side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         tk.Button(row, text="Auto-detect panels", command=self.auto_panels,
                   bg='#e3f2fd').pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        row = tk.Frame(t_dig, bg=bg)
+        row.pack(fill=tk.X, padx=10, pady=(2, 0))
+        tk.Button(row, text="Edit points", command=lambda: self._start_points(False)).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(row, text="Curve by points", command=lambda: self._start_points(True)).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(row, text="Re-extract", command=self.reextract).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         self.listbox = tk.Listbox(t_dig, height=3, exportselection=False, font=('Arial', 9))
         self.listbox.pack(fill=tk.X, padx=10, pady=4)
         self.listbox.bind('<<ListboxSelect>>', lambda e: self._on_list_select())
@@ -1056,6 +1069,8 @@ class SpectrumDigitizer:
                 name=t['name'], roi=[float(v) for v in t['roi']],
                 color=list(t['color']) if isinstance(t['color'], tuple) else t['color'], zero=num(t['zero']),
                 exclude=[[float(v) for v in b] for b in t['exclude']],
+                fixed=bool(t.get('fixed')),
+                points=np.c_[t['xpx'], t['ypx']].tolist() if t.get('fixed') else None,
                 guide=[dict(points=np.asarray(pts, float).tolist(), width=float(w)) for pts, w in t['guide']]
                 if t.get('guide') else None))
         sel = self._selected()
@@ -1138,7 +1153,9 @@ class SpectrumDigitizer:
             self.traces.append(dict(
                 name=t['name'], roi=tuple(t['roi']), color=tuple(col) if isinstance(col, list) else col,
                 zero=t.get('zero'), exclude=[tuple(b) for b in t.get('exclude', [])],
-                xpx=np.array([]), ypx=np.array([]),
+                xpx=np.array([t_pt[0] for t_pt in t['points']], float) if t.get('fixed') and t.get('points') else np.array([]),
+                ypx=np.array([t_pt[1] for t_pt in t['points']], float) if t.get('fixed') and t.get('points') else np.array([]),
+                **({'fixed': True} if t.get('fixed') else {}),
                 **({'guide': [(np.array(g['points'], float), float(g['width'])) for g in t['guide']]}
                    if t.get('guide') else {})))
         wb = d.get('work_box')
@@ -1290,6 +1307,8 @@ class SpectrumDigitizer:
             self._extract_all()
         elif self.mode == 'guide':
             self._guide_press(event, x, y)
+        elif self.mode == 'points':
+            self._points_press(event, x, y)
         elif self.mode == 'straighten':
             self._straight_pts.append((x, y))
             if len(self._straight_pts) == 1:
@@ -1341,6 +1360,9 @@ class SpectrumDigitizer:
         return [tuple(int(v) for v in c) for c in q]
 
     def _on_release(self, event):
+        if self._pdrag is not None:
+            self._points_release(event)
+            return
         if self._stroke is not None:
             self._finish_stroke()
             return
@@ -1376,6 +1398,15 @@ class SpectrumDigitizer:
         if self._work_drag is not None:
             self._work_drag_to(event)
             return
+        if self._pdrag is not None:
+            self._points_motion(event)
+            return
+        if self.mode == 'points' and self._pan is None:
+            idx, _ = self._nearest_point(event) if event.inaxes is self.ax_img else (None, None)
+            cur = 'hand2' if idx is not None else 'crosshair'
+            if cur != self._pt_cursor:
+                self._pt_cursor = cur
+                self.canvas.get_tk_widget().config(cursor=cur)
         if self._gdrag is not None:
             self._reshape_to(event)
             return
@@ -1448,6 +1479,37 @@ class SpectrumDigitizer:
         self._sticky = sticky
         self.status.config(text=text, bg='#d9f2d9' if ok else '#fff3c4')
 
+    @staticmethod
+    def _scrollable(parent, bg):
+        """(outer, inner): a frame whose content scrolls vertically (scrollbar only when it does not fit, mouse
+        wheel while the pointer is over it); widgets go into `inner`. The Digitize tab keeps growing."""
+        outer = tk.Frame(parent, bg=bg)
+        canvas = tk.Canvas(outer, bg=bg, highlightthickness=0)
+        bar = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=bar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        inner = tk.Frame(canvas, bg=bg)
+        win = canvas.create_window((0, 0), window=inner, anchor='nw')
+
+        def fit(_=None):
+            canvas.configure(scrollregion=canvas.bbox('all'))
+            canvas.itemconfigure(win, width=canvas.winfo_width())
+            if inner.winfo_reqheight() > canvas.winfo_height():
+                if not bar.winfo_ismapped():
+                    bar.pack(side=tk.RIGHT, fill=tk.Y)
+            else:
+                bar.pack_forget()
+                canvas.yview_moveto(0)
+        inner.bind('<Configure>', fit)
+        canvas.bind('<Configure>', fit)
+
+        def wheel(e):
+            if inner.winfo_reqheight() > canvas.winfo_height():
+                canvas.yview_scroll(int(-e.delta / 120), 'units')
+        outer.bind('<Enter>', lambda e: outer.bind_all('<MouseWheel>', wheel))
+        outer.bind('<Leave>', lambda e: outer.unbind_all('<MouseWheel>'))
+        return outer, inner
+
     def _update_step_rows(self):
         """The output grid is linear (X step) or logarithmic (points per decade) with the X axis."""
         log = self.v_xlog.get()
@@ -1500,6 +1562,8 @@ class SpectrumDigitizer:
         self._brush_last = None
         self._straight_pts = []
         self._stroke = self._stroke_src = self._gdrag = self._guide_target = None
+        self._pt_target = self._pt_sel = self._pdrag = None
+        self._pt_cursor = ''
         self._guide_cursor = ''
         if self._brush_circle is not None:
             try:
@@ -1747,7 +1811,7 @@ class SpectrumDigitizer:
             self.work_box = (cx - hw + dx, cy - hh + dy, cx + hw + dx, cy + hh + dy)
         elif d['name'] == 'rot':
             ang = np.degrees(np.arctan2(-(x - cx), -(y - cy)))
-            if event.key == 'shift':
+            if self._mods(event)[0]:
                 ang = round(ang / 15) * 15
             self._angle_busy = True
             self.v_angle.set(f"{round(float(ang), 1):g}")
@@ -1882,6 +1946,10 @@ class SpectrumDigitizer:
             if tr is None:
                 messagebox.showwarning("Brush", "Select a curve first (or use 'Brush: new curve').")
                 return
+            if tr.get('fixed'):
+                messagebox.showwarning("Brush", f"{tr['name']} has hand-edited points. Press 'Re-extract' to go back "
+                                                "to the automatic extraction first.")
+                return
         self._cancel_tool(keep_status=True)
         self._nudge = None
         self.mode = 'guide'
@@ -1906,6 +1974,14 @@ class SpectrumDigitizer:
             self._guide_target = self._selected()
         self._redraw()
 
+    @staticmethod
+    def _mods(event):
+        """(shift, ctrl) held during a mouse event. Read from the Tk event state: matplotlib's own `event.key` only
+        knows a modifier if the canvas had the keyboard focus when it was pressed."""
+        st = getattr(getattr(event, 'guiEvent', None), 'state', 0)
+        st = st if isinstance(st, int) else 0
+        return bool(st & 0x1) or event.key == 'shift', bool(st & 0x4) or event.key == 'control'
+
     def _guide_hit(self, event):
         """What a press here would do on the edited curve's paths: ('extend', k, side) at an end, ('reshape', k, i)
         on the path, or None (a new stroke). Distances in screen pixels; Shift turns an end into a pull point."""
@@ -1922,21 +1998,30 @@ class SpectrumDigitizer:
         dpx, k, i, n = best
         if dpx > 14:
             return None
-        if dpx <= 10 and i in (0, n - 1) and event.key != 'shift':
+        if dpx <= 10 and i in (0, n - 1) and not self._mods(event)[0]:
             return ('extend', k, 0 if i == 0 else 1)
         return ('reshape', k, i)
 
     def _guide_push(self, tr, created=False, keep_redo=False):
         """Remember the state of `tr` (or that it was just created) for the brush 'Undo'."""
         self._guide_hist.append(dict(
-            trace=tr, created=created, roi=tuple(tr['roi']),
+            trace=tr, created=created, roi=tuple(tr['roi']), pts=(tr['xpx'].copy(), tr['ypx'].copy(), bool(tr.get('fixed'))),
             guide=None if created or not tr.get('guide') else [(p.copy(), w) for p, w in tr['guide']]))
         if not keep_redo:
             self._guide_redo = []
 
     @staticmethod
     def _guide_state(tr):
-        return dict(roi=tuple(tr['roi']), guide=[(p.copy(), w) for p, w in tr['guide']] if tr.get('guide') else None)
+        return dict(roi=tuple(tr['roi']), guide=[(p.copy(), w) for p, w in tr['guide']] if tr.get('guide') else None,
+                    pts=(tr['xpx'].copy(), tr['ypx'].copy(), bool(tr.get('fixed'))))
+
+    @staticmethod
+    def _restore_pts(tr, pts):
+        tr['xpx'], tr['ypx'] = pts[0].copy(), pts[1].copy()
+        if pts[2]:
+            tr['fixed'] = True
+        else:
+            tr.pop('fixed', None)
 
     def _guide_press(self, event, x, y):
         hit = self._guide_hit(event)
@@ -2066,10 +2151,12 @@ class SpectrumDigitizer:
                 else:
                     tr.pop('guide', None)
                 tr['roi'] = h['roi']
-            self._set_status("Brush edit undone.", ok=True, sticky=True)
+                self._restore_pts(tr, h['pts'])
+            self._pt_sel = None
+            self._set_status("Edit undone.", ok=True, sticky=True)
             self._extract_all()
             return
-        self._set_status("No brush edit to undo.", sticky=True)
+        self._set_status("Nothing to undo here.", sticky=True)
 
     def redo_stroke(self):
         while self._guide_redo:
@@ -2079,6 +2166,7 @@ class SpectrumDigitizer:
                 if tr in self.traces:
                     continue
                 tr['guide'], tr['roi'] = r['guide'], r['roi']
+                self._restore_pts(tr, r['pts'])
                 self.traces.append(tr)
                 self._guide_hist.append(dict(trace=tr, created=True, roi=tuple(tr['roi']), guide=None))
                 self._refresh_list(select=len(self.traces) - 1)
@@ -2091,10 +2179,12 @@ class SpectrumDigitizer:
                 else:
                     tr.pop('guide', None)
                 tr['roi'] = r['roi']
-            self._set_status("Brush edit redone.", ok=True, sticky=True)
+                self._restore_pts(tr, r['pts'])
+            self._pt_sel = None
+            self._set_status("Edit redone.", ok=True, sticky=True)
             self._extract_all()
             return
-        self._set_status("No brush edit to redo.", sticky=True)
+        self._set_status("Nothing to redo here.", sticky=True)
 
     def clear_guide(self):
         tr = self._guide_target or self._selected()
@@ -2180,6 +2270,158 @@ class SpectrumDigitizer:
                 ends, = ax.plot([pts[0, 0], pts[-1, 0]], [pts[0, 1], pts[-1, 1]], 'o', ms=6, mfc='white',
                                 mec='magenta', mew=1.3, zorder=4)
                 self._overlay += [ln, ends]
+
+    # ---- points edited by hand ----
+    # The extracted points of a curve can be corrected where the automatic extraction goes wrong: move, pull a stretch
+    # with a smooth falloff, insert, delete. A curve edited this way is 'fixed': its points are no longer recomputed
+    # until 'Re-extract'. 'Curve by points' makes a curve out of clicks alone.
+    def _start_points(self, new):
+        if not self._need_image():
+            return
+        if not new:
+            tr = self._selected()
+            if tr is None:
+                messagebox.showwarning("Edit points", "Select a curve first (or use 'Curve by points').")
+                return
+            if len(tr['xpx']) == 0:
+                messagebox.showwarning("Edit points", f"{tr['name']} has no extracted points to edit: use "
+                                                      "'Curve by points' to place them yourself.")
+                return
+        self._cancel_tool(keep_status=True)
+        self._nudge = None
+        if new:
+            H, W = self.rgb.shape[:2]
+            n = len(self.traces) + 1
+            names = {t['name'] for t in self.traces}
+            while f"curve{n}" in names:
+                n += 1
+            tr = dict(name=f"curve{n}", roi=(0.0, 0.0, float(W), float(H)), color=None, zero=None, exclude=[],
+                      xpx=np.array([]), ypx=np.array([]), fixed=True)
+            self.traces.append(tr)
+            self._guide_push(tr, created=True)
+            self._refresh_list(select=len(self.traces) - 1)
+        elif not tr.get('fixed'):
+            self._guide_push(tr)
+            tr['fixed'] = True
+        self.mode = 'points'
+        self._pt_target, self._pt_sel = tr, None
+        self.canvas.get_tk_widget().config(cursor='crosshair')
+        self._set_status(f"Points of {tr['name']}: drag a point to move it (Shift: pull its neighbours along with a "
+                         "smooth falloff, 'reach' sets how far). Click on empty space to add a point, drag a box to "
+                         "delete the points inside, Ctrl+click or Delete removes the selected one. Esc ends; "
+                         "'Re-extract' gives the hand edits up.")
+        self._redraw()
+
+    def reextract(self):
+        tr = self._selected()
+        if tr is None or not tr.get('fixed'):
+            self._set_status("The selected curve has no hand-edited points.", sticky=True)
+            return
+        if not messagebox.askyesno("Re-extract", f"Discard the hand-edited points of {tr['name']} and extract it "
+                                                 "automatically again?"):
+            return
+        self._cancel_tool(keep_status=True)
+        self._guide_push(tr)
+        tr.pop('fixed', None)
+        self._set_status(f"{tr['name']}: automatic extraction again ('Undo' brings the hand-edited points back).",
+                         ok=True, sticky=True)
+        self._extract_all()
+
+    def _nearest_point(self, event):
+        """(index, screen distance) of the point of the edited curve closest to the mouse, or (None, None)."""
+        tr = self._pt_target
+        if tr is None or len(tr['xpx']) == 0:
+            return None, None
+        d = np.hypot(*(self.ax_img.transData.transform(np.c_[tr['xpx'], tr['ypx']])
+                       - np.array([event.x, event.y])).T)
+        i = int(np.argmin(d))
+        return (i, float(d[i])) if d[i] <= 9 else (None, None)
+
+    def _pts_sorted(self, tr, x, y, keep=None):
+        """Store the points sorted by X; returns the new index of the point that was at `keep`."""
+        order = np.argsort(x, kind='stable')
+        tr['xpx'], tr['ypx'] = np.asarray(x, float)[order], np.asarray(y, float)[order]
+        return None if keep is None else int(np.nonzero(order == keep)[0][0])
+
+    def _points_press(self, event, x, y):
+        tr = self._pt_target
+        idx, _ = self._nearest_point(event)
+        if idx is not None:
+            shift, ctrl = self._mods(event)
+            if ctrl:
+                self._pts_delete(np.array([idx]))
+                return
+            self._guide_push(tr)
+            self._pdrag = dict(kind='pull' if shift else 'move', i=idx, p0=(x, y),
+                               x0=tr['xpx'].copy(), y0=tr['ypx'].copy(), moved=False)
+        else:
+            self._pdrag = dict(kind='box', p0=(x, y), cur=(x, y), disp0=(event.x, event.y), moved=False)
+
+    def _points_motion(self, event):
+        d, tr = self._pdrag, self._pt_target
+        x, y = self.ax_img.transData.inverted().transform((event.x, event.y))
+        if d['kind'] == 'box':
+            d['cur'] = (float(x), float(y))
+            d['moved'] = np.hypot(event.x - d['disp0'][0], event.y - d['disp0'][1]) >= 4
+        else:
+            dx, dy = x - d['p0'][0], y - d['p0'][1]
+            if d['kind'] == 'move':
+                nx, ny = d['x0'].copy(), d['y0'].copy()
+                nx[d['i']] += dx
+                ny[d['i']] += dy
+            else:
+                moved = reshape_path(np.c_[d['x0'], d['y0']], d['i'], (dx, dy), self._guide_reach())
+                nx, ny = moved[:, 0], moved[:, 1]
+            tr['xpx'], tr['ypx'] = nx, ny
+            d['moved'] = True
+        self._refresh_overlay()
+
+    def _points_release(self, event):
+        d, self._pdrag = self._pdrag, None
+        tr = self._pt_target
+        if d['kind'] == 'box':
+            if not d['moved']:                                       # a click on empty space: a new point
+                self._guide_push(tr)
+                x, y = d['p0']
+                self._pt_sel = self._pts_sorted(tr, np.append(tr['xpx'], x), np.append(tr['ypx'], y), len(tr['xpx']))
+                self._after_points_edit("Point added.")
+            else:                                                    # a box: delete what is inside
+                (bx0, by0), (bx1, by1) = d['p0'], d['cur']
+                inside = ((tr['xpx'] >= min(bx0, bx1)) & (tr['xpx'] <= max(bx0, bx1))
+                          & (tr['ypx'] >= min(by0, by1)) & (tr['ypx'] <= max(by0, by1)))
+                if inside.any():
+                    self._pts_delete(np.nonzero(inside)[0])
+                else:
+                    self._redraw()
+            return
+        if not d['moved']:                                           # a click on a point: select it
+            self._guide_hist.pop()
+            self._pt_sel = d['i']
+            self._redraw()
+            return
+        self._pt_sel = self._pts_sorted(tr, tr['xpx'], tr['ypx'], d['i'])
+        self._after_points_edit("Point moved." if d['kind'] == 'move' else "Stretch pulled.")
+
+    def _pts_delete(self, idxs):
+        tr = self._pt_target
+        self._guide_push(tr)
+        keep = np.ones(len(tr['xpx']), bool)
+        keep[np.asarray(idxs, int)] = False
+        tr['xpx'], tr['ypx'] = tr['xpx'][keep], tr['ypx'][keep]
+        self._pt_sel = None
+        self._after_points_edit(f"{len(idxs)} point(s) deleted.")
+
+    def _on_delete_key(self, event):
+        if isinstance(event.widget, (tk.Entry, tk.Spinbox, tk.Text, ttk.Combobox, tk.Listbox)):
+            return
+        if self.mode == 'points' and self._pt_target is not None and self._pt_sel is not None:
+            self._pts_delete([self._pt_sel])
+            return 'break'
+
+    def _after_points_edit(self, what):
+        tr = self._pt_target
+        self._set_status(f"{what} {tr['name']}: {len(tr['xpx'])} points. Esc ends the editing.", ok=True, sticky=True)
+        self._redraw()
 
     # ---- straighten a tilted scan ----
     def _start_straighten(self):
@@ -2501,6 +2743,8 @@ class SpectrumDigitizer:
         tol = self._num(self.v_tol, 60.0, lo=1)
         dot = self._num(self.v_dot, 1.2, lo=0) / 100.0
         for t in self.traces:
+            if t.get('fixed'):               # points edited by hand are not recomputed ('Re-extract' gives them up)
+                continue
             t['xpx'], t['ypx'] = extract_points(self.rgb, t['roi'], t['color'], thresh, tol, dot, t['exclude'],
                                                    t.get('guide') or ())
         self._redraw()
@@ -2617,9 +2861,10 @@ class SpectrumDigitizer:
         for i, t in enumerate(self.traces):
             col = PALETTE[i % len(PALETTE)]
             x0, y0, x1, y1 = t['roi']
-            r = Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, ec=col, lw=2.0 if t is sel else 0.9)
-            ax.add_patch(r)
-            self._overlay.append(r)
+            if not t.get('fixed') or t.get('guide'):
+                r = Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, ec=col, lw=2.0 if t is sel else 0.9)
+                ax.add_patch(r)
+                self._overlay.append(r)
             for ex in t['exclude']:
                 e = Rectangle((ex[0], ex[1]), ex[2] - ex[0], ex[3] - ex[1], fc='gray', alpha=0.35, ec='gray', lw=0.5)
                 ax.add_patch(e)
@@ -2630,6 +2875,21 @@ class SpectrumDigitizer:
             if self.v_points.get() and len(t['xpx']):
                 ln, = ax.plot(t['xpx'], t['ypx'], '.', color='red', ms=1.5, alpha=0.7)
                 self._overlay.append(ln)
+        tr = self._pt_target
+        if self.mode == 'points' and tr is not None and tr in self.traces and len(tr['xpx']):
+            mk, = ax.plot(tr['xpx'], tr['ypx'], 'o', ms=4, mfc='none', mec='magenta', mew=0.8, zorder=5)
+            self._overlay.append(mk)
+            if self._pt_sel is not None and self._pt_sel < len(tr['xpx']):
+                sm, = ax.plot([tr['xpx'][self._pt_sel]], [tr['ypx'][self._pt_sel]], 'o', ms=8, mfc='magenta',
+                              mec='white', mew=1.2, zorder=6)
+                self._overlay.append(sm)
+            d = self._pdrag
+            if d and d['kind'] == 'box' and d.get('moved'):
+                (bx0, by0), (bx1, by1) = d['p0'], d['cur']
+                rb = Rectangle((min(bx0, bx1), min(by0, by1)), abs(bx1 - bx0), abs(by1 - by0), fill=False,
+                               ec='magenta', ls='--', lw=1.0, zorder=6)
+                ax.add_patch(rb)
+                self._overlay.append(rb)
 
     def _redraw_result(self):
         try:

@@ -89,6 +89,14 @@ can be placed precisely (it also shows the pixel and, once calibrated, the X/Y v
     *Any colour* takes every non-white pixel in the box as the curve (for a trace of mixed shades: black, violet,
     pink... after cleaning the image); the *Colour tolerance* is then how far from white
     a pixel must be (lower it, e.g. to 15, to follow a very pale tail).
+  - *Edit points* — corrects the extracted points of the selected curve by hand where the automatic extraction goes
+    wrong. Drag a point to move it; `Shift`+drag pulls its neighbours along with a smooth falloff (*reach* = how far
+    along the curve, the same box as for the brush); click on empty space to add a point; drag a box over empty
+    space to delete the points inside it; `Ctrl`+click, or select a point (click) and press `Delete`, removes one.
+    `Esc` ends. A curve edited this way keeps its points when the parameters change (it is no longer recomputed);
+    *Re-extract* gives the edits up. *Undo / Redo* (`Ctrl+Z` / `Ctrl+Y` in this tab) go through them.
+  - *Curve by points* — makes a curve out of clicks alone (nothing is extracted): for a curve the program cannot see
+    at all. Y is then the height above the bottom of the image unless the Y axis is calibrated or a zero line is set.
   - *Ignore an area* — drag a box over something inside the curve's box that must be skipped (a
     panel letter, a legend: they show up as spikes in the result plot).
   - *Set zero line* — click the zero level of the curve (only used without a Y calibration).

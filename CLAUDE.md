@@ -131,6 +131,15 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   `_update_step_rows()`. The result plots set log scales. The Y zero line is only used without a Y calibration, so it does
   not meet the log axis. Verified on synthetic plots (a decay over 3 decades on a log Y axis: max relative error 1.2 %, the
   size of one pixel; a sine over 3 decades on a log X axis: error 0.3 % of the range); not on a real log plot.
+- **Hand-edited points** (mode `points`, `_start_points()`): the selected trace is marked `fixed` and `_extract_all()` skips fixed
+  traces, so its `xpx`/`ypx` are the edited points until `reextract()`. Press on a point (<= 9 screen px): drag = move one point,
+  Shift = `reshape_path` pull of the neighbours (arc-length falloff `v_reach`, from the points stored at press), Ctrl = delete,
+  a click selects (Delete key deletes it); press on empty space: a click inserts a point, a drag is a delete box. Points stay
+  sorted by X (`_pts_sorted`). 'Curve by points' creates a fixed trace with a whole-image roi (only used for the default zero;
+  the roi rectangle is not drawn for fixed traces without a guide). The edits use the brush's snapshot stacks: `_guide_push`,
+  `_guide_state` and the undo/redo also keep `(xpx, ypx, fixed)`, so Ctrl+Z in the Digitize tab undoes both. Modifier keys are read
+  from the Tk event state (`_mods`): matplotlib's `event.key` is only set if the canvas had the keyboard focus. The session stores
+  `fixed` + `points`. The Digitize tab is a scrollable frame (`_scrollable`: canvas + scrollbar shown only when needed).
 - **Number arrows** in the Output tab: `_make_spin()` is a `tk.Spinbox` with Tk's own increment set to 0 and the
   command registered with `%d` ('up'/'down'); `_spin_move()` computes the new value (X step: 1-2-5 sequence; window:
   one X step; polynomial order: 1..9). Works with the mouse, press-and-hold and the Up/Down keys. Also used for the advanced
