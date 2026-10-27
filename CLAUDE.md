@@ -64,6 +64,12 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   keeps the opposite edge fixed. A drag only redraws the overlays (`_refresh_overlay`); `_angle_busy` stops the
   `v_angle` trace from doing a full `_redraw`. Because a press on a handle or inside the area starts a drag,
   panning with the left button does not work over the area: right/middle drag pans.
+- **Straighten** (mode `straighten`, `rotate_image()`): rotates `self.rgb` with PIL (`expand=True`, white fill, bicubic)
+  by the angle from two clicked points (`_straightening_angle`: the line is made horizontal, or vertical if it is
+  closer to vertical) or by minus the working area's angle (`straighten_to_area`). The size changes, so
+  `_new_geometry()` clears calibration, curves and working area and refits the view (`im.set_extent`); an `undo_filter`
+  across a size change calls it too. Chosen instead of a calibration with tilted axes (as PlotDigitizer does): the
+  rest of the program keeps assuming straight axes. Test: `StraightenAngleTests`; checked on a synthetic plot tilted by 7°.
 - **Flatten colours** (`flatten_colors()`): non-white pixels (distance from white > colour tolerance, inside the working
   area) become black, undoable. Alternative to the trace mode `'any'`; flattening also changes the saved image.
 - **Eraser** (mode `brush`): press copies `self.rgb` onto `rgb_undo` (one undo step per stroke), motion stamps
@@ -73,7 +79,57 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   ruling line into the box (a bundle of at most ~1 % of the image width of adjacent columns/rows with a run of
   2..tick_max pixels starting at the rule and clear flanks). A curve following the rule gives a wide group and is
   left alone. Tests: `InnerTickTests` (thick ticks, curve hugging the bottom frame). Checked on a real publication figure (not in the repo; ticks gone).
-- **Save Cleaned Image** writes `self.rgb` as PNG (lossless); the session (calibration, boxes) is not saved.
+- **Save Cleaned Image** writes `self.rgb` as PNG: lossless, 8-bit RGB (the program converts every image to RGB on
+  load, so palette/alpha/ICC of the source are not kept), the size of the image on screen, `compress_level=9`
+  (Pillow's default is 6; level 9 only makes the file ~2 % smaller) and the source `dpi` (`self.image_dpi`, read at load).
+  The session (calibration, boxes) is not saved.
+- **Crop** (`crop_to_area()`): bounding box of the working area (rotated: outside the rotated rectangle painted white),
+  same `_new_geometry()` / `_confirm_geometry_change()` path as Straighten: calibration, curves and working area are cleared.
+- **Three tabs** (`self.nb`, a `ttk.Notebook` in the right pane; status box, magnifier and Export stay outside it):
+  'Clean image' (working area, colour tools, eraser, flatten, save) and 'Digitize' (axes, curves, output,
+  advanced extraction settings) and 'Output' (step, smoothing, normalization, show points, result info; the Export button
+  stays outside the tabs). `_on_tab_changed()` ends the tool in progress. The working area and its handles exist only in the
+  clean tab (`_clean_tab_active()` gates `_work_hit()` and the overlay), so in the Digitize tab the left drag pans as
+  usual. `v_tol` is shared: an entry in each tab, one variable.
+- **Left pane views** (`self.nb_view`): 'Image' (the image canvas with the small preview `ax_res` under it, as before) and
+  'Result plot' (`ax_big`, its own canvas with the matplotlib toolbar: no calibration tool needs the clicks of that
+  canvas, unlike the image canvas, where the toolbar stays out). `_draw_result` computes `build_output()` once,
+  draws the preview always and the large plot only while its view is shown (`_view_is_result()`); `_on_tab_changed`
+  shows the Result plot when the Output tab opens. Leaving the image view cancels a tool waiting for a click.
+- **Semi-automatic brush** (mode `guide`, listed before the box in the panel because it is the primary way to make a
+  curve): a trace's `guide` is a list of strokes `(path, width)`; a path is an editable polyline (2 px between points,
+  Gaussian-smoothed, ends kept: `resample_path`, `smooth_path`, `reshape_path`, all core/no Tk). The tool stays active
+  until Esc. On press `_guide_hit()` decides, in screen pixels, between continuing a path (press within 10 px of an
+  end: `_stroke_src` holds which one, the new part is re-smoothed together with the last 3 old points), pulling a
+  stretch (within 14 px of the path: `_gdrag`; `reshape_path` moves the grabbed vertex fully and the others with a
+  cosine falloff over `v_reach` px, always from the vertices stored at press) or drawing a new stroke. Shift turns an
+  end into a pull point. The first stroke of 'new curve' creates the trace (colour from `_guess_color`: the ink colour under the path (None for dark ink, else the median of the inkiest 30 %) is tried with the real extraction, and if it covers fewer than 80 % of the columns the brush spans the trace gets 'any': a trace that changes colour or is pale in places stops early and, because `resample` interpolates between sparse points, comes out as a polyline). `_update_guide_roi` makes the roi the corridors' bounding box.
+  Every edit pushes a snapshot on `_guide_hist` ('Undo brush'); the width spin rewrites the widths of the curve being
+  edited. `corridor_mask()` (PIL discs) is ANDed with the curve mask in `extract_points(guide=...)` just before
+  labelling and the ruling lines are found over the whole image instead of the box (`guided_rules()`: curve-mask rows/columns across >= 50 % of the image; if that leaves fewer than 30 % of the columns the brush spans, `extract_points` repeats the extraction keeping them: the curve itself was the long line, e.g. a flat baseline traced on purpose), then blanked and the inner ticks stripped as in the box mode;
+  crossings inside the corridor are still resolved by `one_point_per_column`. The extraction runs on release, the
+  overlay (RGBA corridors, centre line, end circles) follows the drag. Like PlotDigitizer's semi-auto line, but the
+  corridor limits our own extraction instead of an external vectorizer. Tests: `BrushGuideTests`, `EditablePathTests`.
+- **Session** (`.sdsession`, a zip: `session.json` + `image.png`, `SESSION_VERSION` = 1): `_session_dict()` / `open_session()`. The
+  image is the current `self.rgb` (not a path: crops, rotations and cleaning are in it); calibration, traces (roi, colour,
+  zero, exclude, brush paths at full float precision so the re-extraction is identical), work box and angle, view, and the
+  `_session_vars()` settings are in the JSON. The extracted points are not stored: `_extract_all()` recomputes them. Undo/redo
+  history is not saved. `_set_image()` is the shared part of `load_image()` and `open_session()`. A reopened session gave the
+  same points and CSV output on the test image; a newer `version` is refused.
+- **Redo**: `rgb_redo` (image) and `_guide_redo` (brush paths) are filled by the undo and emptied by any new edit
+  (`_push_undo()`, `_guide_push()`); Ctrl+Z/Ctrl+Y act on the image in the Clean tab and on the brush edits in the Digitize tab
+  (text fields keep their own undo).
+- **Despeckle** (`despeckle()`): `ndi.label` (8-connectivity) of the non-white mask, groups under `v_speck` pixels painted white
+  inside the working area, undoable. **Check grid** (`_draw_check_grid`, core `nice_ticks`): round values of the calibration as
+  lines across the image. **Copy table** (`copy_table()`): tab-separated text; decimal comma option because Excel in an Italian
+  locale reads '0.5' as text or a date (`_system_decimal()` sets the default; the CSV export always uses the point).
+- **Number arrows** in the Output tab: `_make_spin()` is a `tk.Spinbox` with Tk's own increment set to 0 and the
+  command registered with `%d` ('up'/'down'); `_spin_move()` computes the new value (X step: 1-2-5 sequence; window:
+  one X step; polynomial order: 1..9). Works with the mouse, press-and-hold and the Up/Down keys. Also used for the advanced
+  extraction numbers, the colour tolerance and the brush width (kinds 'thresh', 'tol', 'dot', 'bwidth').
+- **Pan** converts the mouse positions with the transform frozen at press time (`_pan` holds it): display Y grows
+  upward while image rows grow downward, and the earlier pixel-to-span scaling moved the image the wrong way vertically.
+  'Center and fit to window' (`_fit_view`, also `Home`) restores the full view; the axes box is centred (aspect 'box').
 - **Layout:** image and result preview are two canvases in a vertical `PanedWindow` (draggable sash).
 - **Status box:** `_update_hint()` derives the next step from the state; `_set_status(..., sticky=True)`
   keeps a one-off message until the user edits something (`_sticky`).

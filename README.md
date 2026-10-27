@@ -13,32 +13,33 @@ resulting data, normalized to the maximum.)
 
 ## Workflow
 
-The panel on the right always says what to do next, and a magnifier follows the mouse so that points
+The panel on the right has three tabs, *Clean image*, *Digitize* and *Output*, and always says what to do next, and a magnifier follows the mouse so that points
 can be placed precisely (it also shows the pixel and, once calibrated, the X/Y value under the cursor).
 
-- **Move around the image:** mouse wheel = zoom, drag = move; *Fit to window* resets the view. These
+- **Move around the image:** mouse wheel = zoom, drag = move (the image follows the mouse); *Center and fit to window* (or `Home`) shows the whole image centred. These
   never interfere with the tools below. `Esc` cancels the tool that is waiting for a click.
-- **Open the image** (File → Open Image, drop it on the window, or pass it on the command line). File → Close Image clears the image, calibration and curves. File → Save Cleaned Image writes the image as it is after the clean-up (PNG), to open again later.
-- **1. Axes.** Press *Pick* next to *X point 1*, click a tick of known value, then type its value in the
-  box; do the same for *X point 2* on a tick far from the first. The Y axis is optional (see below).
-  Reversed axes (e.g. FTIR wavenumbers) work. A point can be re-picked at any time.
-- **Fine-tuning with the keyboard:** after picking a point (or setting a zero line) the arrow keys move
-  it by 1 pixel (`Shift` = 0.2 pixel): ← → for X points, ↑ ↓ for Y points and zero lines. Clicking in a
-  value box selects that point for the arrows; the selected point is drawn in orange. The magnifier
-  follows the point being moved.
-- **2. Curves.** *Add curve* and drag a box around one curve, leaving out axis labels, legends and
-  panel letters; repeat for each curve. For the selected curve:
-  - *Pick its colour* — click on the curve to extract only pixels of that colour (several coloured
-    curves in the same box, coloured lines over a grid...). *Black curve* goes back to dark pixels.
-    *Any colour* takes every non-white pixel in the box as the curve (for a trace of mixed shades: black, violet,
-    pink... after cleaning the image); the *Colour tolerance* of the advanced settings is then how far from white
-    a pixel must be (lower it, e.g. to 15, to follow a very pale tail).
-  - *Set working area* — drag a box (shown dashed blue); the colour tools below act only inside it.
+- **Open the image** (File → Open Image, drop it on the window, or pass it on the command line). File → Close Image clears the image, calibration and curves. 
+- **Sessions** (File → Open Session / Save Session / Save Session As, `Ctrl+O` / `Ctrl+S`, or drop a `.sdsession`
+  file on the window): one file with the image as it is now (after any crop, rotation or cleaning), the axis
+  calibration, the curves with their boxes, colours, zero lines, ignored areas and brush paths, the working area
+  and all the settings; opening it re-extracts the curves, so the result is the same. The undo/redo history is not
+  kept. It is a zip (`session.json` + `image.png`), so it can be inspected with any zip tool.
+- **Tab 'Clean image' (optional, first).** Prepares the picture before digitizing: everything here edits the image itself, every step can be undone with *Undo*, and *Save Cleaned Image* (also under File) writes the result as a PNG to open again later: lossless (the pixels are exactly the ones on screen), 8-bit RGB, the size in pixels of the image shown (so after a crop or rotation it is the new size), zlib compression level 9 and the dpi of the source file when it had one; the status box reports the size and the file size. *Next: Digitize* goes on to the second tab. The *Colour tolerance* box is the RGB distance within which a shade counts as a clicked colour.
+  - *Straighten* (first, for a tilted scan): *Straighten: 2 points on an axis* — click two points, as far
+    apart as possible, on a line that should be horizontal (the X axis, a frame edge) or vertical, and the
+    whole image is rotated to make it so (white corners). *Straighten to working area* — draw a working
+    area, turn it with the round handle until it follows the plot frame, then press it: the image is rotated
+    by the opposite angle. Pixel positions change, so calibration and curves are cleared (it asks first);
+    *Undo* restores the image. This replaces tilted-axis calibration: the axes are straight afterwards.
+  - *Set working area* — drag a box (shown dashed blue, only in this tab); the colour tools act only inside it.
     *Whole image* removes it. The area has handles, like a shape in a drawing program: drag inside it to
     move it, drag a square handle on a corner or an edge to resize it (the opposite side stays put), drag the
     round handle above the top edge to rotate it (Shift = steps of 15°); the *Rotate the working area* box
     (degrees, counter-clockwise) gives the exact angle, for tilted scans. Move the image itself with the
     right or middle mouse button while the area is shown.
+  - *Crop to working area* — cuts the image down to the working area, so the part outside the figure is gone
+    (a rotated area is cut to its bounding box and what is outside the area itself becomes white). The pixel
+    positions change, so calibration and curves are cleared (it asks first); *Undo* restores the image.
   - *Erase colours* / *Keep only colours* — click a pixel of the trace, or drag a small box over it to take
     all the colours inside the box (best for curves drawn with slightly different shades); repeat if
     needed (selections are marked in magenta), then press *Apply*: every pixel within the colour tolerance
@@ -49,15 +50,45 @@ can be placed precisely (it also shows the pixel and, once calibrated, the X/Y v
   - *Flatten colours* — turns every non-white pixel (further from white than the colour tolerance) of the working
     area, or of the whole image, into black: a trace of mixed shades becomes one colour that the default
     detection follows, and the saved cleaned image is uniform. *Undo* restores.
+  - *Despeckle* — removes the specks of a scan: groups of non-white pixels (8-connected, further from white
+    than the colour tolerance) smaller than the chosen number of pixels, inside the working area. A curve is one
+    big group and stays; raise the size to remove larger specks, but keep it below the size of the dots of a
+    scatter plot.
+  - *Undo / Redo* (`Ctrl+Z` / `Ctrl+Y`) — step back and forward through the image edits; a new edit ends the redo
+    history. In the Digitize tab the same keys undo and redo the brush edits (the *Undo* / *Redo* buttons beside
+    the brush width).
   - *Erase an area* — drag a box over a legend or a panel letter: it is painted white for all curves
     (*Undo* restores it). Do this first, so the legend is never mistaken for part of a spectrum.
+- **Tab 'Digitize'.** The steps below.
+- **Check grid.** In the Digitize tab, *Show check grid on the image* draws round-valued lines of the calibration over the image (X always, Y when it is calibrated), labelled with their values: if they do not meet the plot's own ticks, the calibration is off.
+- **1. Axes.** Press *Pick* next to *X point 1*, click a tick of known value, then type its value in the
+  box; do the same for *X point 2* on a tick far from the first. The Y axis is optional (see below).
+  Reversed axes (e.g. FTIR wavenumbers) work. A point can be re-picked at any time.
+- **Fine-tuning with the keyboard:** after picking a point (or setting a zero line) the arrow keys move
+  it by 1 pixel (`Shift` = 0.2 pixel): ← → for X points, ↑ ↓ for Y points and zero lines. Clicking in a
+  value box selects that point for the arrows; the selected point is drawn in orange. The magnifier
+  follows the point being moved.
+- **2. Curves.** Two ways to make a curve. The first is the **brush**, for curves that cross others or run close
+  to them: *Brush: new curve*, then drag along the curve. You do not need a steady hand: stop whenever you
+  like and resume by starting a new drag at an end of the path (the ends are drawn as small circles); where
+  the path strays, drag that stretch (not its end) back onto the curve and the neighbouring points follow
+  smoothly (*reach* = how far along the path, in pixels; hold `Shift` to pull an end instead of resuming
+  it). The path is smoothed, the translucent corridor around it (*width*, in pixels, a little wider than the
+  line) is where the curve is looked for, and the colour to follow is chosen for you: the ink colour under the path (dark pixels, or that colour, which keeps crossing curves of other colours out), or *Any colour* when that single colour would find the curve in fewer than 80 % of the columns under the brush (a curve that changes colour along its way, or is pale in places, would otherwise stop early and come out as a broken line; the status box says so if it still happens). The brush stays
+  active until `Esc`; *Brush: edit selected* goes back to a curve's path, *Undo brush* takes back the last
+  edit, *Clear* drops the path. Axes, frame and grid lines are removed from the corridor like in the box mode (they are looked for in the whole image, so a curve falling onto the x axis is not replaced by the axis; a flat curve you trace on purpose is kept). Where a curve merges into the axis line it cannot be told apart and the points stop there. The
+  second way is *Add curve* with a drag box around one curve that has its own space, leaving out axis
+  labels, legends and panel letters. Repeat for each curve. For the selected curve:
+  - *Pick its colour* — click on the curve to extract only pixels of that colour (several coloured
+    curves in the same box, coloured lines over a grid...). *Black curve* goes back to dark pixels.
+    *Any colour* takes every non-white pixel in the box as the curve (for a trace of mixed shades: black, violet,
+    pink... after cleaning the image); the *Colour tolerance* is then how far from white
+    a pixel must be (lower it, e.g. to 15, to follow a very pale tail).
   - *Ignore an area* — drag a box over something inside the curve's box that must be skipped (a
     panel letter, a legend: they show up as spikes in the result plot).
   - *Set zero line* — click the zero level of the curve (only used without a Y calibration).
   - Rename (also by double-click) or Remove.
-- **3. Output.** X step, smoothing and normalization act live on the result plot under the image (drag the boundary between them to give more room to the image);
-  *Show the extracted points* toggles the red dots on the image, and *Advanced extraction settings*
-  has the dark threshold, colour tolerance and single-dot size. *Export CSV*.
+- **Tab 'Output'.** X step and normalization, and the *Smoothing* box (window and polynomial order), act live on the result plot. The numbers have up/down arrows (here and in the other tabs: tolerance, thresholds, brush width) (also the arrow keys, and press-and-hold): the X step walks 0.1, 0.2, 0.5, 1, 2, 5, 10..., the smoothing window moves by one X step, the polynomial order by one. The left pane has two views, *Image* and *Result plot*: under the image there is a small preview (drag the boundary to resize it), and the *Result plot* view shows the digitized curves large, with axis labels, a legend and the matplotlib toolbar (zoom, pan, *save as image*). Opening the Output tab switches the left pane to the Result plot, the other tabs switch it back to the image; the views can also be chosen by hand. *Show the extracted points* toggles the red dots on the image. *Export CSV* (the green button, always visible) writes one column per curve. *Copy table to clipboard (for Excel)* puts the same table on the clipboard as tab-separated text (File → Copy Table to Clipboard too); the *decimal comma* box writes ',' instead of '.', which an Italian/European Excel needs to take the numbers as numbers (it starts ticked when the system's number format uses the comma). The *Advanced extraction settings* (dark threshold, colour tolerance, single-dot size) are at the bottom of the Digitize tab.
 
 **Auto-detect panels** is a shortcut for framed, Origin-style figures with one or more stacked
 panels: it finds the frame, creates one curve per panel, calibrates X from the left/right frame edges

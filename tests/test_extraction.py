@@ -224,3 +224,132 @@ class AnyColourTests(unittest.TestCase):
         np.testing.assert_allclose(ys, 50.5, atol=0.1)
         xs, _ = sd.extract_points(img, (0, 0, 400, 100))    # dark pixels only: black and blue, not the pale shades
         self.assertEqual(len(xs), 120)
+
+
+class StraightenAngleTests(unittest.TestCase):
+    """Counter-clockwise rotation that makes the clicked line horizontal (or vertical if it is closer to it)."""
+
+    def test_horizontal_lines(self):
+        f = sd.SpectrumDigitizer._straightening_angle
+        self.assertAlmostEqual(f(0, 0, 100, 0), 0.0)
+        self.assertAlmostEqual(f(0, 0, 100, 10), np.degrees(np.arctan(0.1)))    # descends to the right: turn CCW
+        self.assertAlmostEqual(f(100, 10, 0, 0), np.degrees(np.arctan(0.1)))    # same line, points swapped
+
+    def test_vertical_lines(self):
+        f = sd.SpectrumDigitizer._straightening_angle
+        self.assertAlmostEqual(f(0, 0, 0, 100), 0.0)
+        self.assertAlmostEqual(f(0, 0, 10, 100), -np.degrees(np.arctan(0.1)))   # bottom to the right: turn CW
+
+
+class BrushGuideTests(unittest.TestCase):
+    """Semi-automatic tracing: a brush stroke along one curve keeps the extraction on it where another curve
+    crosses it."""
+
+    @classmethod
+    def setUpClass(cls):
+        W, H = 500, 300
+        cls.x = np.arange(40, 460)
+        cls.ya = 150 - 70 * np.sin((cls.x - 40) / 420 * 2 * np.pi)       # the curve to follow
+        yb = 60 + (cls.x - 40) * 0.45                                    # a line crossing it twice
+        img = np.full((H, W, 3), 255.0)
+        for xx, a, b in zip(cls.x, cls.ya, yb):
+            img[int(round(a)) - 1:int(round(a)) + 1, xx] = 0
+            img[int(round(b)) - 1:int(round(b)) + 1, xx] = 0
+        cls.img = img
+        rng = np.random.default_rng(3)
+        cls.stroke = np.c_[cls.x[::7], cls.ya[::7] + rng.normal(0, 2, len(cls.x[::7]))]   # a shaky hand-drawn path
+
+    def test_corridor_covers_the_path_and_not_far_pixels(self):
+        m = sd.corridor_mask((100, 200), [(np.array([[20.0, 50.0], [180.0, 50.0]]), 10)])
+        self.assertTrue(m[50, 100] and m[53, 100])
+        self.assertFalse(m[60, 100])
+        self.assertTrue(m[50, 20] and not m[50, 5])
+
+    def test_without_guide_both_curves_are_mixed(self):
+        xs, ys = sd.extract_points(self.img, (30, 30, 470, 270))
+        self.assertGreater(np.max(np.abs(ys - np.interp(xs, self.x, self.ya))), 20)
+
+    def test_guide_follows_the_stroked_curve_through_the_crossings(self):
+        xs, ys = sd.extract_points(self.img, (30, 30, 470, 270), guide=[(self.stroke, 12)])
+        cols = np.round(xs).astype(int)
+        self.assertEqual(len(cols), len(np.unique(cols)))
+        err = np.abs(ys - np.interp(xs, self.x, self.ya))
+        self.assertLess(err.mean(), 1.5)
+        self.assertLess(err.max(), 8.0)
+        self.assertGreater(len(xs), 400)
+
+
+class EditablePathTests(unittest.TestCase):
+    """The brush path can be resampled, smoothed and pulled back onto the curve with a smooth falloff."""
+
+    def test_resample_keeps_ends_and_spacing(self):
+        p = sd.resample_path(np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]]), 2.0)
+        np.testing.assert_allclose(p[0], [0, 0])
+        np.testing.assert_allclose(p[-1], [10, 10])
+        self.assertTrue(np.allclose(np.hypot(*np.diff(p, axis=0).T), 2.0))
+        self.assertEqual(len(sd.resample_path(np.array([[1.0, 1.0], [1.0, 1.0]]), 2.0)), 1)   # a click
+
+    def test_smooth_keeps_ends_and_reduces_jitter(self):
+        rng = np.random.default_rng(1)
+        x = np.linspace(0, 100, 80)
+        noisy = np.c_[x, 20 + rng.normal(0, 2, len(x))]
+        out = sd.smooth_path(noisy, 2.0)
+        np.testing.assert_allclose(out[[0, -1]], noisy[[0, -1]])
+        self.assertLess(np.std(out[5:-5, 1] - 20), np.std(noisy[5:-5, 1] - 20) / 2)
+
+    def test_reshape_moves_the_grabbed_point_fully_and_far_ones_not_at_all(self):
+        p = np.c_[np.arange(0.0, 200.0, 2.0), np.zeros(100)]
+        q = sd.reshape_path(p, 50, (0.0, 10.0), 40.0)
+        self.assertAlmostEqual(q[50, 1], 10.0)                    # grabbed vertex follows the mouse
+        self.assertAlmostEqual(q[0, 1], 0.0)                      # beyond the reach: untouched
+        self.assertAlmostEqual(q[-1, 1], 0.0)
+        bump = q[50:71, 1]
+        self.assertTrue(np.all(np.diff(bump) <= 1e-9))            # decays smoothly, no jump
+        self.assertLess(np.max(np.abs(np.diff(q[:, 1]))), 1.0)
+
+
+class BrushGuideAxisTests(unittest.TestCase):
+    """With a brush the box is only the corridor's bounding box, so the axes are found over the whole image:
+    a curve that falls onto the x axis must not be replaced by the axis."""
+
+    @staticmethod
+    def _plot():
+        img = np.full((300, 500, 3), 255.0)
+        img[250:254, 50:450] = 0                        # x axis: 4 px thick, across 80 % of the image
+        img[40:254, 50:54] = 0                          # y axis
+        for x in range(60, 440, 40):                    # inner ticks on the x axis
+            img[240:250, x:x + 3] = 0
+        xs = np.arange(60, 440)
+        ys = 249 - 180 * np.exp(-(xs - 60) / 45.0)      # falls from the top towards the axis and hugs it
+        for x, y in zip(xs, ys):
+            img[int(round(y)) - 1:int(round(y)) + 1, x] = (200, 0, 0)
+        return img, xs, ys
+
+    def test_axis_is_not_taken_for_the_curve(self):
+        img, xs, ys = self._plot()
+        path = np.c_[xs[::4], ys[::4] + 3]              # a hand a little low: the corridor reaches the axis
+        for color in (None, (200, 0, 0), 'any'):
+            px, py = sd.extract_points(img, (xs[0] - 10, 30, xs[-1] + 10, 270), color, 128, 60,
+                                       guide=[(path, 24)])
+            self.assertGreater(len(px), 100, color)
+            self.assertLess(py.max(), 250, color)       # nothing on the axis rows (250..253)
+
+    def test_a_flat_curve_traced_on_purpose_is_kept(self):
+        img = np.full((300, 500, 3), 255.0)
+        img[149:151, 80:380] = 0                        # a flat curve across 60 % of the image
+        path = np.c_[np.arange(80.0, 380.0, 4), np.full(75, 150.0)]
+        px, py = sd.extract_points(img, (70, 130, 390, 170), guide=[(path, 12)])
+        self.assertGreater(len(px), 250)
+        np.testing.assert_allclose(py, 150.0, atol=1.0)
+
+
+class NiceTicksTests(unittest.TestCase):
+    def test_round_values_inside_the_range(self):
+        t = sd.nice_ticks(396.2, 802.5)
+        np.testing.assert_allclose(t, np.arange(400, 801, 50))
+        np.testing.assert_allclose(sd.nice_ticks(0.03, 0.81), np.arange(1, 9) / 10)
+
+    def test_reversed_range_and_degenerate_input(self):
+        np.testing.assert_allclose(sd.nice_ticks(4000, 400)[:3], [500, 1000, 1500])    # FTIR-style order
+        self.assertEqual(len(sd.nice_ticks(5, 5)), 0)
+        self.assertEqual(len(sd.nice_ticks(np.nan, 5)), 0)
