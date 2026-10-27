@@ -353,3 +353,41 @@ class NiceTicksTests(unittest.TestCase):
         np.testing.assert_allclose(sd.nice_ticks(4000, 400)[:3], [500, 1000, 1500])    # FTIR-style order
         self.assertEqual(len(sd.nice_ticks(5, 5)), 0)
         self.assertEqual(len(sd.nice_ticks(np.nan, 5)), 0)
+
+
+class LogAxisTests(unittest.TestCase):
+    """Calibration on a logarithmic axis: log10 of the value is linear in the pixel."""
+
+    def test_pixel_to_value_and_back(self):
+        cal = sd.AxisCal(100.0, 1.0, 500.0, 1000.0, log=True)        # 3 decades over 400 px
+        self.assertAlmostEqual(float(sd.lin_map(cal, 300.0)), 10 ** 1.5)
+        np.testing.assert_allclose(sd.lin_map(cal, [100.0, 200.0, 500.0]), [1.0, 10 ** 0.75, 1000.0])
+        np.testing.assert_allclose(cal.to_pixel(sd.lin_map(cal, [123.0, 456.0])), [123.0, 456.0])
+        self.assertEqual(cal[0], (100.0, 1.0))                        # still a plain pair of points
+
+    def test_reversed_log_axis(self):
+        cal = sd.AxisCal(50.0, 1.0, 350.0, 1e-3, log=True)           # a decay plot: Y falls with the row
+        self.assertAlmostEqual(float(sd.lin_map(cal, 200.0)), 10 ** -1.5)
+
+    def test_linear_calibration_is_unchanged(self):
+        cal = sd.AxisCal(100.0, 400.0, 900.0, 800.0)
+        self.assertAlmostEqual(float(sd.lin_map(cal, 500.0)), 600.0)
+        self.assertAlmostEqual(float(cal.to_pixel(600.0)), 500.0)
+
+    def test_trace_values_on_log_axes(self):
+        xcal = sd.AxisCal(0.0, 1.0, 300.0, 1000.0, log=True)
+        ycal = sd.AxisCal(0.0, 1.0, 100.0, 100.0, log=True)
+        x, y = sd.trace_values(np.array([300.0, 0.0, 150.0]), np.array([100.0, 0.0, 50.0]), xcal, ycal, None, 0)
+        np.testing.assert_allclose(x, [1.0, 10 ** 1.5, 1000.0])
+        np.testing.assert_allclose(y, [1.0, 10.0, 100.0])
+
+    def test_grid_regular_in_decades(self):
+        g = sd.make_grid(np.log10(1.2), np.log10(900.0), 1 / 10)       # what build_output does: step in log10
+        r = 10.0 ** g
+        np.testing.assert_allclose(r[1:] / r[:-1], 10 ** 0.1)
+        self.assertGreaterEqual(r[0], 1.2 * (1 - 1e-9))
+
+    def test_log_ticks(self):
+        np.testing.assert_allclose(sd.log_ticks(0.8, 12000.0), [1, 10, 100, 1000, 10000])       # > 4 decades: powers only
+        np.testing.assert_allclose(sd.log_ticks(3, 400), [5, 10, 20, 50, 100, 200])             # 2 decades: 1, 2, 5
+        self.assertEqual(len(sd.log_ticks(-1, 10)), 0)                                          # no log scale below 0

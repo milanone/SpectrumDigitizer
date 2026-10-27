@@ -24,7 +24,7 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
 - **Coordinates:** everything is in image pixel coordinates (pixel centres at integers, as `imshow`
   shows them). Calibration = two points per axis (`cal_px`: clicked pixel, `cal_var`: typed value);
   `xcal`/`ycal` are properties built from them (None until usable), so editing a value in the panel
-  updates everything. Linear, so reversed axes work.
+  updates everything. Linear (or logarithmic, see below), so reversed axes work.
 - **Traces** (`self.traces`, dicts): `roi` box, optional `color` (None = dark pixels, `'any'` = every non-white pixel, distance from white > the colour tolerance), `zero` (pixel row),
   `exclude` boxes, and the cached extracted points `xpx`/`ypx`. `_extract_all()` re-extracts (after a
   change of threshold, colour or box); `_redraw()` only rebuilds the output (step, smoothing,
@@ -123,6 +123,14 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   inside the working area, undoable. **Check grid** (`_draw_check_grid`, core `nice_ticks`): round values of the calibration as
   lines across the image. **Copy table** (`copy_table()`): tab-separated text; decimal comma option because Excel in an Italian
   locale reads '0.5' as text or a date (`_system_decimal()` sets the default; the CSV export always uses the point).
+- **Logarithmic axes**: `xcal`/`ycal` are `AxisCal` objects (a `tuple` subclass, so `(p1, v1), (p2, v2) = cal` and `lin_map`
+  still work, with a `log` flag set from the `v_xlog` / `v_ylog` checkboxes; values <= 0 make the calibration unusable).
+  `lin_map` maps on a log scale when `cal.log`; `to_pixel` is its inverse (check grid: `log_ticks`). `build_output` does the
+  edge tolerance, resampling and smoothing in the linear space of each axis (log10 of the values on a log axis), then converts back;
+  the X grid is `make_grid` on log10(X) with step 1/`v_ppd` (points per decade), shown instead of the X step by
+  `_update_step_rows()`. The result plots set log scales. The Y zero line is only used without a Y calibration, so it does
+  not meet the log axis. Verified on synthetic plots (a decay over 3 decades on a log Y axis: max relative error 1.2 %, the
+  size of one pixel; a sine over 3 decades on a log X axis: error 0.3 % of the range); not on a real log plot.
 - **Number arrows** in the Output tab: `_make_spin()` is a `tk.Spinbox` with Tk's own increment set to 0 and the
   command registered with `%d` ('up'/'down'); `_spin_move()` computes the new value (X step: 1-2-5 sequence; window:
   one X step; polynomial order: 1..9). Works with the mouse, press-and-hold and the Up/Down keys. Also used for the advanced

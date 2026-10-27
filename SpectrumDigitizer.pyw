@@ -348,10 +348,39 @@ def one_point_per_column(pts):
     return pts[keep]
 
 
+class AxisCal(tuple):
+    """Two-point calibration ((p1, v1), (p2, v2)) of an axis: pixel p1 shows the value v1, pixel p2 the value v2.
+    With `log` the scale is logarithmic (log10 of the value is linear in the pixel; the values must be positive).
+    It is a tuple, so code that only unpacks the two points keeps working."""
+
+    def __new__(cls, p1, v1, p2, v2, log=False):
+        self = super().__new__(cls, ((p1, v1), (p2, v2)))
+        self.log = bool(log)
+        return self
+
+    def to_pixel(self, v):
+        """The pixel where the value `v` is (inverse of lin_map)."""
+        (p1, v1), (p2, v2) = self
+        v = np.asarray(v, float)
+        if self.log:
+            v, v1, v2 = np.log10(v), np.log10(v1), np.log10(v2)
+        return p1 + (v - v1) * (p2 - p1) / (v2 - v1)
+
+    def transformed(self):
+        """((p1, t1), (p2, t2)) with t = value on a linear axis, log10(value) on a logarithmic one."""
+        (p1, v1), (p2, v2) = self
+        return ((p1, np.log10(v1)), (p2, np.log10(v2))) if self.log else ((p1, v1), (p2, v2))
+
+
 def lin_map(cal, p):
-    """Map pixel coordinates to values with a two-point calibration ((p1, v1), (p2, v2))."""
+    """Map pixel coordinates to values with a two-point calibration ((p1, v1), (p2, v2)); an AxisCal with
+    `log` set maps them on a logarithmic scale."""
     (p1, v1), (p2, v2) = cal
-    return v1 + (np.asarray(p, float) - p1) * (v2 - v1) / (p2 - p1)
+    p = np.asarray(p, float)
+    if getattr(cal, 'log', False):
+        l1, l2 = np.log10(v1), np.log10(v2)
+        return 10.0 ** (l1 + (p - p1) * (l2 - l1) / (p2 - p1))
+    return v1 + (p - p1) * (v2 - v1) / (p2 - p1)
 
 
 def trace_values(xpx, ypx, xcal, ycal, zero, roi_bottom):
@@ -373,6 +402,19 @@ def make_grid(lo, hi, step):
     n0 = int(np.ceil(lo / step - 1e-9))
     n1 = int(np.floor(hi / step + 1e-9))
     return np.arange(n0, n1 + 1) * step
+
+
+def log_ticks(lo, hi):
+    """Values of the check grid on a logarithmic axis: every power of ten, with 2 and 5 when the range is under
+    4 decades, with 1..9 under 2 decades; ascending, inside [lo, hi]."""
+    lo, hi = float(min(lo, hi)), float(max(lo, hi))
+    if not (lo > 0 and np.isfinite(hi)) or hi <= lo:
+        return np.array([])
+    span = np.log10(hi) - np.log10(lo)
+    mult = (1,) if span >= 4 else (1, 2, 5) if span >= 2 else tuple(range(1, 10))
+    vals = np.array([m * 10.0 ** d for d in range(int(np.floor(np.log10(lo))), int(np.ceil(np.log10(hi))) + 1)
+                     for m in mult])
+    return vals[(vals >= lo * (1 - 1e-9)) & (vals <= hi * (1 + 1e-9))]
 
 
 def resample(x, y, grid, tol):
@@ -442,6 +484,9 @@ class SpectrumDigitizer:
         self.v_bwidth = tk.StringVar(value='14')   # brush width of the semi-automatic tracing, image pixels
         self.v_speck = tk.StringVar(value='6')     # despeckle: blobs with fewer pixels than this are removed
         self.v_grid = tk.BooleanVar(value=False)   # draw the check grid of the calibration over the image
+        self.v_xlog = tk.BooleanVar(value=False)   # the X axis of the plot is logarithmic
+        self.v_ylog = tk.BooleanVar(value=False)   # the Y axis of the plot is logarithmic
+        self.v_ppd = tk.StringVar(value='50')      # output points per decade (logarithmic X axis)
         self.v_reach = tk.StringVar(value='60')    # how far along the path a pulled point drags its neighbours, pixels
         self._straight_pts = []   # points clicked so far for 'Straighten' (image coordinates)
         self._brush_last = None   # last point of the eraser stroke in progress (image coordinates), else None
@@ -609,8 +654,11 @@ class SpectrumDigitizer:
             self.cal_var[key].trace_add('write', lambda *_: self._on_cal_edit())
         row = tk.Frame(t_dig, bg=bg)
         row.pack(fill=tk.X, padx=10)
-        tk.Checkbutton(row, text="Show check grid on the image", variable=self.v_grid, bg=bg, font=('Arial', 8),
+        tk.Checkbutton(row, text="Check grid", variable=self.v_grid, bg=bg, font=('Arial', 8),
                        command=self._redraw).pack(side=tk.LEFT)
+        for text, var in (("X log", self.v_xlog), ("Y log", self.v_ylog)):
+            tk.Checkbutton(row, text=text, variable=var, bg=bg, font=('Arial', 8)).pack(side=tk.LEFT)
+            var.trace_add('write', lambda *_: self._on_axis_mode())      # also when a session sets it
         tk.Button(row, text="Clear Y axis", command=lambda: self._clear_axis('y'), font=('Arial', 8)).pack(
             side=tk.RIGHT)
 
@@ -764,8 +812,15 @@ class SpectrumDigitizer:
             v.trace_add('write', lambda *_: self._schedule(False))
         grid = tk.Frame(t_out, bg=bg)
         grid.pack(fill=tk.X, padx=10, pady=4)
-        tk.Label(grid, text="X step", bg=bg, anchor='w', font=('Arial', 9)).grid(row=0, column=0, sticky='w', pady=2)
-        self._make_spin(grid, self.v_step, 'step').grid(row=0, column=1, padx=6)
+        self.step_rows = {
+            'lin': (tk.Label(grid, text="X step", bg=bg, anchor='w', font=('Arial', 9)),
+                    self._make_spin(grid, self.v_step, 'step')),
+            'log': (tk.Label(grid, text="X points per decade", bg=bg, anchor='w', font=('Arial', 9)),
+                    self._make_spin(grid, self.v_ppd, 'ppd'))}
+        for lab, spin in self.step_rows.values():
+            lab.grid(row=0, column=0, sticky='w', pady=2)
+            spin.grid(row=0, column=1, padx=6)
+        self.v_ppd.trace_add('write', lambda *_: self._schedule(False))
         tk.Label(grid, text="Normalize", bg=bg, anchor='w', font=('Arial', 9)).grid(row=1, column=0, sticky='w')
         cb = ttk.Combobox(grid, textvariable=self.v_norm, values=['none', 'max'], width=6, state='readonly')
         cb.grid(row=1, column=1, padx=6, pady=2)
@@ -774,8 +829,8 @@ class SpectrumDigitizer:
         box = tk.LabelFrame(t_out, text=" Smoothing (Savitzky-Golay) ", bg=bg, font=('Arial', 9, 'bold'),
                             fg='#1f4e79', bd=2, relief=tk.GROOVE, padx=8, pady=6)
         box.pack(fill=tk.X, padx=10, pady=(6, 4))
-        tk.Label(box, text="Window (X units, 0 = off)", bg=bg, anchor='w', font=('Arial', 9)).grid(
-            row=0, column=0, sticky='w', pady=2)
+        self.l_window = tk.Label(box, text="Window (X units, 0 = off)", bg=bg, anchor='w', font=('Arial', 9))
+        self.l_window.grid(row=0, column=0, sticky='w', pady=2)
         self._make_spin(box, self.v_smooth, 'window').grid(row=0, column=1, padx=6)
         tk.Label(box, text="Polynomial order", bg=bg, anchor='w', font=('Arial', 9)).grid(
             row=1, column=0, sticky='w', pady=2)
@@ -783,6 +838,7 @@ class SpectrumDigitizer:
         tk.Label(box, text="The arrows change the window by one X step, the order by one.", bg=bg, fg='#777777',
                  font=('Arial', 8), anchor='w', justify='left', wraplength=340).grid(
             row=2, column=0, columnspan=2, sticky='w')
+        self._update_step_rows()
         tk.Checkbutton(t_out, text="Show the extracted points on the image", variable=self.v_points,
                        bg=bg, command=self._redraw, anchor='w').pack(fill=tk.X, padx=10)
         self.info = tk.Label(t_out, text="", bg=bg, font=('Consolas', 9), fg='#555555',
@@ -818,13 +874,14 @@ class SpectrumDigitizer:
             nxt = [c for c in cands if c > x * (1 + 1e-9)] if direction > 0 else [c for c in cands if c < x * (1 - 1e-9)]
             new = (nxt[0] if direction > 0 else nxt[-1]) if nxt else x
         elif kind == 'window':
-            inc = self._num(self.v_step, 1.0, lo=1e-12)
+            inc = self._x_step()
             new = max(0.0, (x or 0.0) + direction * inc)
         elif kind == 'order':
             new = min(9, max(1, int(round(x or 3)) + direction))
         else:                                          # simple bounded numbers: (min, max, increment)
             lo, hi, inc = {'thresh': (0, 255, 5), 'tol': (1, 441, 5), 'bwidth': (2, 200, 2), 'dot': (0.1, 50, 0.1),
-                           'reach': (10, 400, 10), 'speck': (1, 500, 1)}[kind]
+                           'reach': (10, 400, 10), 'speck': (1, 500, 1),
+                           'ppd': (1, 2000, 5)}[kind]
             new = min(hi, max(lo, (lo if x is None else x) + direction * inc))
         var.set(f"{new:.10g}")
 
@@ -873,7 +930,10 @@ class SpectrumDigitizer:
         v1, v2 = self._to_float(self.cal_var[axis + '1'].get()), self._to_float(self.cal_var[axis + '2'].get())
         if None in (p1, p2, v1, v2) or abs(p2 - p1) < 3 or v1 == v2:
             return None
-        return (p1, v1), (p2, v2)
+        log = (self.v_xlog if axis == 'x' else self.v_ylog).get()
+        if log and (v1 <= 0 or v2 <= 0):
+            return None                  # a logarithmic axis has no zero or negative values
+        return AxisCal(p1, v1, p2, v2, log)
 
     def missing_reason(self):
         """Why there is no result yet, in words (None if there is one to compute)."""
@@ -888,8 +948,15 @@ class SpectrumDigitizer:
                 problems.append(f"X point {n} has no value (type a number in its box)")
         if not problems:
             if self.xcal is None:
-                problems.append("the two X points must be at different positions on the image, "
-                                "with different values")
+                if self.v_xlog.get() and (self._to_float(self.cal_var['x1'].get()) or 1) * (
+                        self._to_float(self.cal_var['x2'].get()) or 1) <= 0:
+                    problems.append("a logarithmic X axis needs positive values")
+                elif self.v_xlog.get() and 0 in (self._to_float(self.cal_var['x1'].get()),
+                                                 self._to_float(self.cal_var['x2'].get())):
+                    problems.append("a logarithmic X axis cannot have the value 0")
+                else:
+                    problems.append("the two X points must be at different positions on the image, "
+                                    "with different values")
         if problems:
             return "X axis not calibrated: " + "; ".join(problems) + "."
         if not self.traces:
@@ -1005,7 +1072,8 @@ class SpectrumDigitizer:
     def _session_vars(self):
         return dict(step=self.v_step, smooth=self.v_smooth, poly=self.v_poly, norm=self.v_norm, points=self.v_points,
                     thresh=self.v_thresh, tol=self.v_tol, dot=self.v_dot, brush_width=self.v_bwidth,
-                    brush_reach=self.v_reach, eraser=self.v_brush)
+                    brush_reach=self.v_reach, eraser=self.v_brush, xlog=self.v_xlog, ylog=self.v_ylog,
+                    ppd=self.v_ppd)
 
     def save_session(self, ask=False):
         """One file (a zip): session.json with the calibration, curves, brush paths, working area and settings,
@@ -1379,6 +1447,25 @@ class SpectrumDigitizer:
     def _set_status(self, text, ok=False, sticky=False):
         self._sticky = sticky
         self.status.config(text=text, bg='#d9f2d9' if ok else '#fff3c4')
+
+    def _update_step_rows(self):
+        """The output grid is linear (X step) or logarithmic (points per decade) with the X axis."""
+        log = self.v_xlog.get()
+        for key, (lab, spin) in self.step_rows.items():
+            for w in (lab, spin):
+                (w.grid if (key == 'log') == log else w.grid_remove)()
+        self.l_window.config(text="Window (decades, 0 = off)" if log else "Window (X units, 0 = off)")
+
+    def _on_axis_mode(self):
+        self._update_step_rows()
+        self._sticky = False
+        self._extract_all() if self.rgb is not None else None
+
+    def _x_step(self):
+        """The output step in the space the grid is regular in: X units, or decades for a logarithmic axis."""
+        if self.v_xlog.get():
+            return 1.0 / self._num(self.v_ppd, 50.0, lo=1e-9)
+        return self._num(self.v_step, 1.0, lo=1e-12)
 
     def _on_cal_edit(self):
         self._sticky = False
@@ -2052,10 +2139,9 @@ class SpectrumDigitizer:
         for axis, cal, size in (('x', self.xcal, W), ('y', self.ycal, H)):
             if cal is None:
                 continue
-            (p1, v1), (p2, v2) = cal
             v_lo, v_hi = lin_map(cal, [0.0, size - 1.0])
-            for v in nice_ticks(v_lo, v_hi, 10):
-                px = p1 + (v - v1) * (p2 - p1) / (v2 - v1)
+            for v in (log_ticks(v_lo, v_hi) if cal.log else nice_ticks(v_lo, v_hi, 10)):
+                px = float(cal.to_pixel(v))
                 if axis == 'x':
                     ln = ax.axvline(px, color='#00acc1', lw=0.6, alpha=0.9, zorder=3)
                     tx = ax.text(px, 2, f" {v:g}", color='#006064', fontsize=7, va='top', ha='left', clip_on=True,
@@ -2420,33 +2506,41 @@ class SpectrumDigitizer:
         self._redraw()
 
     def build_output(self):
-        """(grid, {name: values}) for all traces, or None if not computable."""
+        """(grid, {name: values}) for all traces, or None if not computable. The resampling, the smoothing and the
+        edge tolerance work in the space where the axes are linear: log10 of the values on a logarithmic axis (so
+        the X grid is regular in decades and a decay is interpolated and smoothed as a curve, not as a cliff)."""
         xcal, ycal = self.xcal, self.ycal
         if xcal is None:
             return None
-        step = self._num(self.v_step, 1.0, lo=1e-12)
+        xlog = xcal.log
+        ylog = ycal is not None and ycal.log
+        step = self._x_step()
         if step <= 0:
             return None
         smooth = self._num(self.v_smooth, 0.0, lo=0)
         poly = int(self._num(self.v_poly, 3, lo=1))
-        # An edge point is kept up to 2 px outside the data (the pixel size in X units).
-        tol = 2 * abs((xcal[1][1] - xcal[0][1]) / (xcal[1][0] - xcal[0][0]))
+        # An edge point is kept up to 2 px outside the data (the pixel size in X units, or in decades).
+        (p1, t1), (p2, t2) = xcal.transformed()
+        tol = 2 * abs((t2 - t1) / (p2 - p1))
         curves = []
         for t in self.traces:
             if len(t['xpx']) < 2:
                 continue
             x, y = trace_values(t['xpx'], t['ypx'], xcal, ycal, t['zero'], t['roi'][3])
-            curves.append((t['name'], x, y))
+            curves.append((t['name'], np.log10(x) if xlog else x, np.log10(y) if ylog else y))
         if not curves:
             return None
-        grid = make_grid(min(c[1].min() for c in curves), max(c[1].max() for c in curves), step)
-        if len(grid) < 2:
+        grid_t = make_grid(min(c[1].min() for c in curves), max(c[1].max() for c in curves), step)
+        if len(grid_t) < 2:
             return None
+        grid = 10.0 ** grid_t if xlog else grid_t
         cols = {}
         for name, x, y in curves:
-            v = resample(x, y, grid, tol)
+            v = resample(x, y, grid_t, tol)
             if smooth > 0:
                 v = smooth_values(v, round(smooth / step), poly)
+            if ylog:
+                v = 10.0 ** v
             if self.v_norm.get() == 'max' and np.isfinite(v).any():
                 top = np.nanmax(v)
                 if top != 0:
@@ -2558,7 +2652,7 @@ class SpectrumDigitizer:
 
     def _y_description(self):
         if self.ycal is not None:
-            return "calibrated"
+            return "calibrated, log scale" if self.ycal.log else "calibrated"
         return "normalized to the maximum" if self.v_norm.get() == 'max' else "pixels above the zero line"
 
     def _plot_result(self, ax, out, big):
@@ -2566,6 +2660,9 @@ class SpectrumDigitizer:
         ax.clear()
         ax.tick_params(labelsize=10 if big else 7)
         ax.grid(True, ls=':', alpha=0.5)
+        xc, yc = self.xcal, self.ycal
+        ax.set_xscale('log' if xc is not None and xc.log else 'linear')
+        ax.set_yscale('log' if yc is not None and yc.log else 'linear')
         if out is None:
             msg = self.missing_reason() or "Nothing to show: check the X step (it must be a positive number)."
             ax.text(0.5, 0.5, msg, ha='center', va='center', transform=ax.transAxes, fontsize=11 if big else 9,

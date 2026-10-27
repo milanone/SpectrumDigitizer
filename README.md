@@ -63,7 +63,12 @@ can be placed precisely (it also shows the pixel and, once calibrated, the X/Y v
 - **Check grid.** In the Digitize tab, *Show check grid on the image* draws round-valued lines of the calibration over the image (X always, Y when it is calibrated), labelled with their values: if they do not meet the plot's own ticks, the calibration is off.
 - **1. Axes.** Press *Pick* next to *X point 1*, click a tick of known value, then type its value in the
   box; do the same for *X point 2* on a tick far from the first. The Y axis is optional (see below).
-  Reversed axes (e.g. FTIR wavenumbers) work. A point can be re-picked at any time.
+  Reversed axes (e.g. FTIR wavenumbers) work. A point can be re-picked at any time. **Logarithmic axes:** tick *X log* and/or
+  *Y log* (next to *Check grid*) before or after picking the points; the two values of that axis must then be positive,
+  and the position between them is read on a log scale (the value under the cursor in the magnifier too). On a
+  logarithmic X axis the output grid is regular in decades: the Output tab asks *X points per decade* instead of the X step,
+  and the smoothing window is in decades; the curves are interpolated and smoothed in log10 of the value, so a decay
+  over several decades is not distorted. The result plots use log axes. The check grid shows 1, 2, 5 times powers of ten.
 - **Fine-tuning with the keyboard:** after picking a point (or setting a zero line) the arrow keys move
   it by 1 pixel (`Shift` = 0.2 pixel): ← → for X points, ↑ ↓ for Y points and zero lines. Clicking in a
   value box selects that point for the arrows; the selected point is drawn in orange. The magnifier
@@ -120,7 +125,7 @@ treats the spectra as FTIR.
   ruling line too; draw the box around the part that is not flat.
 - Each X position gets one point per curve (the centroid of its pixels): vertical segments of a curve
   are reduced to their midpoint, and the result is limited by the image resolution (about ±1 pixel).
-- Only linear axes. Anti-aliased/JPEG images work in principle; very low-resolution or heavily
+- Linear and logarithmic axes, each axis independently (checked on synthetic plots: a 3-decade decay and a log X sweep, errors of about one pixel). Anti-aliased/JPEG images work in principle; very low-resolution or heavily
   compressed ones give noisy curves (raise the smoothing).
 - Dotted curves: dots are recognised by size (*Max dot size*); dots touching each other are treated
   as a continuous line.
