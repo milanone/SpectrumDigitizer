@@ -5,11 +5,22 @@ numbers: a CSV with one column per curve on a regular X grid, ready to be opened
 [LabSpectrumManager](https://github.com/milanone/LabSpectrumManager) (File → Open Files) or any other
 tool.
 
-![SpectrumDigitizer screenshot](screenshot.png)
+![SpectrumDigitizer screenshot: the Digitize tab](screenshot.png)
 
-(Screenshot: the synthetic test figure in `examples/` — a continuous curve above a dotted one —
-after *Auto-detect panels*. The red points are the extracted curves; the plot below the image is the
-resulting data, normalized to the maximum.)
+The **Digitize** tab on the synthetic test figure in `examples/` (a continuous curve above a dotted one) after
+*Auto-detect panels*: the red points are the extracted curves, and the plot under the image is the resulting data,
+normalized to the maximum.
+
+![The Clean image tab with a working area](screenshot_clean.png)
+
+The **Clean image** tab: the working area (dashed, with handles to move, resize and rotate it) limits the colour tools,
+the eraser, despeckle, straighten and crop.
+
+![The Output tab with the result plot and an area analysis](screenshot_result.png)
+
+The **Output** tab with the large result plot: the shaded band is the area of curve *a* above a straight baseline
+between 400 and 560, with its numbers in the Analysis box. (All three screenshots are taken from the real program by
+`examples/make_screenshots.py`.)
 
 ## Workflow
 

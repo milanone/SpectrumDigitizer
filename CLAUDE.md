@@ -163,6 +163,13 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   index_col=0)`: comma, X first). Do not switch to `;` without changing that reader.
 - **PlotStyleKit is not used:** the figure is a working view of an image, not a publication plot.
 
+## Screenshots
+
+`screenshot.png`, `screenshot_clean.png` and `screenshot_result.png` come from the real window on the synthetic
+`examples/example_two_panels.png` (no real data) through `python examples/make_screenshots.py` (Windows only: DPI-aware
+screen grab of the window frame, the window forced on top for a second). Rerun it after a change of the interface and look at
+the three images before publishing: the title bar shows only the example file name.
+
 ## Verified / not verified
 
 Verified on the synthetic figure (`examples/example_two_panels.png`, made by `examples/make_example.py`):
