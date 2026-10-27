@@ -161,7 +161,16 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   calibration lines, small red points, toggled by a checkbox).
 - **CSV format** is the one LabSpectrumManager's generic reader expects (`pd.read_csv(path,
   index_col=0)`: comma, X first). Do not switch to `;` without changing that reader.
-- **PlotStyleKit is not used:** the figure is a working view of an image, not a publication plot.
+- **PlotStyleKit** (the first host of its integration module `plotstylekit.py`, API 1; see that repo's README): the file carries the
+  common bootstrap text between the `PlotStyleKit bootstrap` comment lines (generated from PlotStyleKit's README: change it there,
+  not here) and `PSK_MIN_API`. `psk` is the module or None, `PSK_PROBLEM` says why. At start, if `psk is None` and the user has not
+  declined (`_psk_config()['declined']`), `_offer_plotstylekit()` asks for the folder after 400 ms; File > PlotStyleKit...
+  (`plotstylekit_dialog()`) changes it later; `_adopt_plotstylekit()` starts it without restarting. With it, the big result plot
+  gets `psk.style()` + `psk.screen_fonts()` in `_plot_result` (the preview and the on-screen curve colours stay `PALETTE`, to match
+  the boxes on the image), and `_result_figure()` builds a separate title-less `Figure` for `save_figure_image()` /
+  `save_figure_pickle()` / `edit_figure()`, which go through `psk.*_dialog()` (publication copy at 9 x 6.75 cm). **Fallbacks without
+  it**: plain look, plain `savefig` / pickle of that figure, and 'Edit Figure' offers to locate PlotStyleKit. Verified by driving all
+  of this with patched dialogs (found, not found + chosen, cancelled + remembered, wrong folder, other copy).
 
 ## Icon
 

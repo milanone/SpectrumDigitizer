@@ -11,9 +11,11 @@ The extraction functions at the top of the file do not need Tk, so the tests can
 import csv
 import io
 import json
+import pickle
 import re
 import os
 import sys
+import traceback
 import zipfile
 
 import numpy as np
@@ -35,6 +37,95 @@ try:
     HAS_DND = True
 except ImportError:
     HAS_DND = False
+
+# ---- PlotStyleKit bootstrap: the same text in every program (PlotStyleKit/README.md, 'Using it from a program') ----
+import json
+import os
+
+PSK_MIN_API = 1
+PSK_CONFIG = os.path.join(os.path.expanduser('~'), '.plotstylekit.json')
+
+
+def _psk_config():
+    try:
+        with open(PSK_CONFIG, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _psk_save(**changes):
+    cfg = _psk_config()
+    cfg.update(changes)
+    try:
+        with open(PSK_CONFIG, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f)
+    except OSError:
+        pass
+
+
+def _psk_try(folder, min_api):
+    """(module, problem): problem is None when plotstylekit.py in `folder` loads and is recent enough."""
+    import importlib.util as ilu
+    path = os.path.join(folder, 'plotstylekit.py')
+    if not os.path.isfile(path):
+        return None, f"plotstylekit.py is not in {folder}"
+    try:
+        spec = ilu.spec_from_file_location('plotstylekit', path)
+        mod = ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except Exception as e:
+        return None, f"plotstylekit.py in {folder} cannot be loaded: {e}"
+    if getattr(mod, 'API', 0) < min_api:
+        return None, (f"PlotStyleKit in {folder} is too old for this program (API {getattr(mod, 'API', '?')}, "
+                      f"it needs {min_api}): update it")
+    return mod, None
+
+
+def _load_plotstylekit(min_api=PSK_MIN_API):
+    """(module, problem): the first usable PlotStyleKit, or None and a sentence saying what was wrong."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    folders = [here, os.environ.get('PLOTSTYLEKIT'), _psk_config().get('path'), os.path.join(here, '..', 'PlotStyleKit'),
+               os.path.expanduser(os.path.join('~', 'progetti', 'PlotStyleKit'))]
+    problem = "PlotStyleKit was not found (next to the program, PLOTSTYLEKIT, a folder you chose, ../PlotStyleKit)"
+    for folder in filter(None, folders):
+        if os.path.isfile(os.path.join(folder, 'plotstylekit.py')):
+            mod, why = _psk_try(folder, min_api)
+            if mod is not None:
+                return mod, None
+            problem = why
+    return None, problem
+
+
+def _ask_plotstylekit_folder(parent, problem, min_api=PSK_MIN_API):
+    """The warning that asks for the folder of PlotStyleKit. Returns the module, or None if the user cancels
+    (remembered: the program is not asked again) or closes the folder dialog (asked again next time)."""
+    from tkinter import filedialog, messagebox
+    while True:
+        if not messagebox.askokcancel(
+                "PlotStyleKit", problem + ".\n\nOK: choose the folder that contains plotstylekit.py.\n"
+                "Cancel: use the program without it (plain matplotlib look, no Edit Figure). You will not be asked "
+                "again; File > PlotStyleKit... lets you change your mind.", parent=parent):
+            _psk_save(declined=True)
+            return None
+        folder = filedialog.askdirectory(parent=parent, title="Folder of PlotStyleKit (contains plotstylekit.py)")
+        if not folder:
+            return None
+        mod, why = _psk_try(folder, min_api)
+        if mod is not None:
+            _psk_save(path=folder, declined=False)
+            return mod
+        problem = why
+
+
+psk, PSK_PROBLEM = _load_plotstylekit()
+if psk is not None:
+    try:
+        psk.setup()
+    except Exception as e:
+        psk, PSK_PROBLEM = None, f"PlotStyleKit failed to start: {e}"
+# ---- end of the PlotStyleKit bootstrap ----
+
 
 def _system_decimal():
     """The decimal separator of the operating system's number format ('.' if it cannot be read)."""
@@ -560,6 +651,11 @@ class SpectrumDigitizer:
         fm.add_command(label="Export CSV...", command=self.export_csv)
         fm.add_command(label="Copy Table to Clipboard", command=self.copy_table)
         fm.add_separator()
+        fm.add_command(label="Save Figure Image (PNG, PDF, SVG)...", command=self.save_figure_image)
+        fm.add_command(label="Save Figure (pickle)...", command=self.save_figure_pickle)
+        fm.add_command(label="Edit Figure...", command=self.edit_figure)
+        fm.add_command(label="PlotStyleKit...", command=self.plotstylekit_dialog)
+        fm.add_separator()
         fm.add_command(label="Exit", command=root.destroy)
         menu.add_cascade(label="File", menu=fm)
         root.config(menu=menu)
@@ -638,6 +734,8 @@ class SpectrumDigitizer:
 
         self._show_empty()
         self._update_hint()
+        if psk is None and not _psk_config().get('declined'):
+            root.after(400, lambda: self._offer_plotstylekit(PSK_PROBLEM))
         if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
             self.open_path(sys.argv[1])
 
@@ -3062,8 +3160,10 @@ class SpectrumDigitizer:
             return "calibrated, log scale" if self.ycal.log else "calibrated"
         return "normalized to the maximum" if self.v_norm.get() == 'max' else "pixels above the zero line"
 
-    def _plot_result(self, ax, out, big):
-        """Draw the digitized curves (`out` = build_output()) on `ax`: a small preview or the large plot."""
+    def _plot_result(self, ax, out, big, fig=None, title=True, screen=True):
+        """Draw the digitized curves (`out` = build_output()) on `ax`: a small preview or the large plot. The large
+        plot gets the Origin look from PlotStyleKit when it is in use (`fig` is its figure; `title=False` for a
+        figure to publish; `screen=False` keeps the paper font sizes instead of bumping them for the pane)."""
         ax.clear()
         ax.tick_params(labelsize=10 if big else 7)
         ax.grid(True, ls=':', alpha=0.5)
@@ -3087,10 +3187,20 @@ class SpectrumDigitizer:
         if big:
             ax.set_xlabel("X", fontsize=11)
             ax.set_ylabel(f"Y ({self._y_description()})", fontsize=11)
-            if self.image_path:
+            if title and self.image_path:
                 ax.set_title(os.path.basename(self.image_path), fontsize=10, color='#555555')
             ax.legend(fontsize=10)
-            self.fig_big.tight_layout()
+            fig = fig or self.fig_big
+            if psk is not None:
+                try:
+                    psk.style(ax, fig, set_size=False)
+                    if screen:
+                        psk.screen_fonts(ax, fig)
+                except Exception:
+                    traceback.print_exc()
+                    fig.tight_layout()
+            else:
+                fig.tight_layout()
         elif len(cols) > 1:
             ax.legend(fontsize=7)
 
@@ -3155,6 +3265,118 @@ class SpectrumDigitizer:
         self._set_status(f"Table copied: {len(grid)} rows, {len(cols)} curve(s) "
                          f"({'decimal comma' if self.v_comma.get() else 'decimal point'}). Paste it in Excel.",
                          ok=True, sticky=True)
+
+    # ---- PlotStyleKit: the Origin look, Save Figure, Edit Figure (each with a fallback without it) ----
+    def _adopt_plotstylekit(self, mod):
+        global psk, PSK_PROBLEM
+        try:
+            mod.setup()
+        except Exception as e:
+            messagebox.showwarning("PlotStyleKit", f"PlotStyleKit failed to start:\n{e}", parent=self.root)
+            return False
+        psk, PSK_PROBLEM = mod, None
+        self._set_status(f"PlotStyleKit {mod.VERSION} is in use ({os.path.dirname(mod.__file__)}): the result plot has "
+                         "the Origin look, and Save Figure / Edit Figure are available in the File menu.",
+                         ok=True, sticky=True)
+        self._redraw_result()
+        return True
+
+    def _offer_plotstylekit(self, problem):
+        """The warning that asks for the folder of PlotStyleKit (at start-up, and from File > PlotStyleKit...)."""
+        mod = _ask_plotstylekit_folder(self.root, problem)
+        if mod is not None:
+            self._adopt_plotstylekit(mod)
+        else:
+            self._set_status("Without PlotStyleKit: plain matplotlib look, figures saved as they are, no Edit Figure. "
+                             "File > PlotStyleKit... changes that.", sticky=True)
+
+    def plotstylekit_dialog(self):
+        """File > PlotStyleKit...: locate it (when it is not in use) or pick another copy (when it is)."""
+        if psk is None:
+            _psk_save(declined=False)
+            self._offer_plotstylekit(PSK_PROBLEM or "PlotStyleKit is not in use")
+            return
+        folder = filedialog.askdirectory(parent=self.root, title="Folder of PlotStyleKit (now in use: "
+                                         f"{os.path.dirname(psk.__file__)})")
+        if not folder:
+            return
+        mod, why = _psk_try(folder, PSK_MIN_API)
+        if mod is None:
+            messagebox.showwarning("PlotStyleKit", why + ".", parent=self.root)
+            return
+        _psk_save(path=folder, declined=False)
+        self._adopt_plotstylekit(mod)
+
+    def _result_figure(self):
+        """A new Figure with the result plot, for a file or the editor (not the one on screen); None if there is none."""
+        out = self.build_output()
+        if out is None:
+            messagebox.showwarning("Figure", self.missing_reason() or "Nothing to show yet.")
+            return None
+        self._analysis_shapes = self._run_analysis(out)
+        fig = Figure(figsize=(7, 5))
+        self._plot_result(fig.add_subplot(111), out, big=True, fig=fig, title=False, screen=False)
+        return fig
+
+    def _figure_names(self):
+        base = os.path.splitext(os.path.basename(self.image_path or "figure"))[0]
+        return base, (os.path.dirname(self.image_path) if self.image_path else None)
+
+    def save_figure_image(self):
+        """The result plot as PNG / PDF / SVG: Origin 'single' size through PlotStyleKit, else as matplotlib draws it."""
+        fig = self._result_figure()
+        if fig is None:
+            return
+        base, folder = self._figure_names()
+        if psk is not None:
+            psk.save_image_dialog(fig, self.root, initialdir=folder, initialfile=base + "_result.png")
+            return
+        path = filedialog.asksaveasfilename(parent=self.root, title="Save Figure Image", initialdir=folder,
+                                            initialfile=base + "_result.png", defaultextension=".png",
+                                            filetypes=[("PNG", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg")])
+        if not path:
+            return
+        try:
+            fig.savefig(path, dpi=300, bbox_inches='tight')
+        except Exception as e:
+            messagebox.showerror("Save Figure Image", f"Save failed:\n{e}", parent=self.root)
+            return
+        self._set_status(f"Figure saved: {path} (plain matplotlib look: PlotStyleKit is not in use).", ok=True, sticky=True)
+
+    def save_figure_pickle(self):
+        """The result plot as a matplotlib pickle, reopenable with the PlotStyleKit editor (Origin 'single' size when
+        PlotStyleKit is in use, else the figure as it is)."""
+        fig = self._result_figure()
+        if fig is None:
+            return
+        base, folder = self._figure_names()
+        if psk is not None:
+            psk.save_pickle_dialog(fig, self.root, initialdir=folder, initialfile=base + "_result.fig.pickle")
+            return
+        path = filedialog.asksaveasfilename(parent=self.root, title="Save Figure", initialdir=folder,
+                                            initialfile=base + "_result.fig.pickle", defaultextension=".fig.pickle",
+                                            filetypes=[("Matplotlib Figure (pickle)", "*.pickle *.pkl")])
+        if not path:
+            return
+        try:
+            with open(path, 'wb') as f:
+                pickle.dump(fig, f)
+        except Exception as e:
+            messagebox.showerror("Save Figure", f"Save failed:\n{e}", parent=self.root)
+            return
+        self._set_status(f"Figure saved: {path} (not restyled: PlotStyleKit is not in use).", ok=True, sticky=True)
+
+    def edit_figure(self):
+        """The PlotStyleKit figure editor on the result plot. Without PlotStyleKit there is no editor: offer to find it."""
+        if psk is None:
+            if messagebox.askyesno("Edit Figure", "The figure editor belongs to PlotStyleKit, which is not in use.\n\n"
+                                   "Locate PlotStyleKit now?", parent=self.root):
+                self.plotstylekit_dialog()
+            if psk is None:
+                return
+        fig = self._result_figure()
+        if fig is not None:
+            psk.edit_dialog(fig, self.root, title=self._figure_names()[0])
 
     def export_csv(self):
         if not self._need_image():

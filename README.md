@@ -71,6 +71,15 @@ can be placed precisely (it also shows the pixel and, once calibrated, the X/Y v
   - *Erase an area* — drag a box over a legend or a panel letter: it is painted white for all curves
     (*Undo* restores it). Do this first, so the legend is never mistaken for part of a spectrum.
 - **Tab 'Digitize'.** The steps below.
+- **Figures for a paper (PlotStyleKit).** The result plot has the Origin look of
+  [PlotStyleKit](https://github.com/milanone/PlotStyleKit) (Arial, full box, outward ticks, no grid) and the File menu has
+  *Save Figure Image (PNG, PDF, SVG)...*, *Save Figure (pickle)...* and *Edit Figure...*: the figure is redrawn at the
+  publication size (9 x 6.75 cm, 300 dpi) without a title and handed to the PlotStyleKit editor or to a file. PlotStyleKit is
+  optional: the program looks for it next to itself (`../PlotStyleKit`), in `~/progetti/PlotStyleKit`, in the folder the
+  environment variable `PLOTSTYLEKIT` names, or in the folder you chose the last time. If it is not found the program says so
+  at start and asks for the folder, with *Cancel* for going without (it will not ask again; *File > PlotStyleKit...* changes
+  that). Without it the plot keeps a plain matplotlib look, *Save Figure* writes the figure as drawn (no preset size, no
+  restyling), and *Edit Figure* offers to locate PlotStyleKit.
 - **Check grid.** In the Digitize tab, *Show check grid on the image* draws round-valued lines of the calibration over the image (X always, Y when it is calibrated), labelled with their values: if they do not meet the plot's own ticks, the calibration is off.
 - **1. Axes.** Press *Pick* next to *X point 1*, click a tick of known value, then type its value in the
   box; do the same for *X point 2* on a tick far from the first. The Y axis is optional (see below).

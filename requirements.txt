@@ -3,3 +3,4 @@ scipy
 pillow
 matplotlib
 tkinterdnd2  # optional: drag-and-drop of the image onto the window
+# PlotStyleKit is not a pip package: clone https://github.com/milanone/PlotStyleKit next to this folder (optional; see README)
