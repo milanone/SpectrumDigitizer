@@ -29,6 +29,7 @@ import matplotlib
 matplotlib.use('TkAgg')
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.lines import Line2D
 from matplotlib.patches import Circle, Polygon, Rectangle
 from matplotlib.widgets import RectangleSelector
 
@@ -474,12 +475,14 @@ def erase_mask_along(rgb, xs, ys, radius, tol=60.0):
 
 def join_dashes(rgb, tol, max_gap, region=None):
     """Make dashed lines continuous. The ink (distance from white above `tol`, inside `region` if given) is split in
-    connected groups; each group has two ends (the extremes along its main axis). Two ends of different groups
-    that are at most `max_gap` pixels apart, and that look at each other (the straight stroke between them leaves
-    each end within 70 degrees of its own direction), are joined by that stroke, nearest pairs first, each end used
-    once and two groups joined at most once. The stroke has the colour (darkest shades) and thickness of the dash.
-    Returns (new float image, number of joins). Dashes that touch another line are one group with it: erase that
-    line first (the gap it leaves is joined too)."""
+    connected groups; each group has two ends (the extremes along its main axis) and, at each end, the local direction
+    the dash is heading (from the pixels within 8 px of the tip, so a dash bent over a peak keeps its bend). Two ends
+    of different groups that are at most `max_gap` pixels apart, and that look at each other (the line between them
+    leaves each end within JOIN_MAX_ANGLE degrees of its direction), are joined, nearest pairs first, each end used once and two
+    groups joined at most once. The join is a smooth curve (cubic Hermite: it leaves each end along its direction), not
+    a straight chord, so a peak whose top fell in the gap is rounded instead of cut flat. It has the colour (darkest
+    shades) and thickness of the dash. Returns (new float image, number of joins). Dashes that touch another line
+    are one group with it: erase that line first (the gap it leaves is joined too)."""
     ink = np.sqrt(((255.0 - rgb) ** 2).sum(axis=2)) > tol
     if region is not None:
         ink &= region
@@ -499,12 +502,16 @@ def join_dashes(rgb, tol, max_gap, region=None):
         for sign in (-1, 1):
             tip = t.max() if sign > 0 else t.min()
             sel = (t >= tip - 1.5) if sign > 0 else (t <= tip + 1.5)
-            ends.append((g, pts[sel].mean(axis=0), sign * axis))
+            end = pts[sel].mean(axis=0)
+            near = pts[np.hypot(*(pts - end).T) <= 8.0].mean(axis=0)
+            d = end - near
+            norm = float(np.hypot(*d))
+            ends.append((g, end, d / norm if norm > 0.5 else sign * axis))
         shade = rgb[ys, xs]
         dark = shade[np.argsort(shade.sum(axis=1))[:max(1, len(xs) // 3)]]
         span = max(np.ptp(xs), np.ptp(ys)) + 1
         look.append((tuple(int(v) for v in np.median(dark, axis=0)), max(1, int(round(len(xs) / span)))))
-    cos_min = np.cos(np.radians(70))
+    cos_min = np.cos(np.radians(JOIN_MAX_ANGLE))
     cand = []
     for a in range(len(ends)):
         for b in range(a + 1, len(ends)):
@@ -514,20 +521,72 @@ def join_dashes(rgb, tol, max_gap, region=None):
                 continue
             v = pb - pa
             d = float(np.hypot(*v))
-            if d <= max_gap and (d < 1e-9 or ((v @ da) / d >= cos_min and (-v @ db) / d >= cos_min)):
-                cand.append((d, a, b))
+            if d > max_gap:
+                continue
+            ca, cb = ((v @ da) / d, (-v @ db) / d) if d > 1e-9 else (1.0, 1.0)
+            if ca >= cos_min and cb >= cos_min:
+                # nearest first, but a dash straight ahead beats a nearer one off to the side (the other flank of a peak)
+                cand.append((d * (3.0 - ca - cb), d, a, b))
+    cand.sort()
     img = Image.fromarray(rgb.astype(np.uint8))
     draw = ImageDraw.Draw(img)
     used, pairs, joins = set(), set(), 0
-    for d, a, b in sorted(cand):
+    for _, d, a, b in cand:
         ga, gb = ends[a][0], ends[b][0]
         if a in used or b in used or (min(ga, gb), max(ga, gb)) in pairs:
             continue
         used.update((a, b))
         pairs.add((min(ga, gb), max(ga, gb)))
-        draw.line([tuple(ends[a][1]), tuple(ends[b][1])], fill=look[ga][0], width=max(look[ga][1], look[gb][1]))
+        p0, p1 = ends[a][1], ends[b][1]
+        m0, m1 = ends[a][2] * d * HERMITE_TENSION, -ends[b][2] * d * HERMITE_TENSION
+        u = np.linspace(0.0, 1.0, max(int(d), 4) + 1)[:, None]
+        curve = ((2 * u**3 - 3 * u**2 + 1) * p0 + (u**3 - 2 * u**2 + u) * m0
+                 + (-2 * u**3 + 3 * u**2) * p1 + (u**3 - u**2) * m1)
+        draw.line([tuple(q) for q in curve], fill=look[ga][0], width=max(look[ga][1], look[gb][1]), joint='curve')
         joins += 1
     return np.asarray(img).astype(float), joins
+
+
+def draw_link(rgb, tol, p0, p1, snap=6.0):
+    """A hand-made link between two points of a broken line: both ends are moved to the nearest ink pixel (distance from
+    white above `tol`) within `snap` pixels, and a straight stroke with the colour (darkest shades) and the thickness of
+    the ink around the first end (the second if the first finds none) is drawn between them. Returns (new float image,
+    (end 1, end 2)), or None if neither end is near ink."""
+    H, W = rgb.shape[:2]
+    ink = np.sqrt(((255.0 - rgb) ** 2).sum(axis=2)) > tol
+    found = []
+    for x, y in (p0, p1):
+        r = int(np.ceil(snap))
+        ya, yb, xa, xb = max(int(y) - r, 0), min(int(y) + r + 1, H), max(int(x) - r, 0), min(int(x) + r + 1, W)
+        yy, xx = np.nonzero(ink[ya:yb, xa:xb])
+        yy, xx = yy + ya, xx + xa
+        d = np.hypot(xx - x, yy - y)
+        found.append((float(xx[np.argmin(d)]), float(yy[np.argmin(d)])) if len(d) and d.min() <= snap else None)
+    if found[0] is None and found[1] is None:
+        return None
+    ends = (found[0] or tuple(p0), found[1] or tuple(p1))
+    # the stroke looks like the ink of the end that has some: the component under it, in a window of 41 px
+    look = None
+    for end, f in zip(ends, found):
+        if f is None:
+            continue
+        x, y = int(round(f[0])), int(round(f[1]))
+        ya, yb, xa, xb = max(y - 20, 0), min(y + 21, H), max(x - 20, 0), min(x + 21, W)
+        lab, _ = ndi.label(ink[ya:yb, xa:xb], structure=np.ones((3, 3)))
+        comp = lab == lab[y - ya, x - xa]
+        ys, xs = np.nonzero(comp)
+        shade = rgb[ya:yb, xa:xb][comp]
+        dark = shade[np.argsort(shade.sum(axis=1))[:max(1, len(xs) // 3)]]
+        span = max(np.ptp(xs), np.ptp(ys)) + 1
+        look = (tuple(int(v) for v in np.median(dark, axis=0)), max(1, int(round(len(xs) / span))))
+        break
+    img = Image.fromarray(rgb.astype(np.uint8))
+    ImageDraw.Draw(img).line([ends[0], ends[1]], fill=look[0], width=look[1])
+    return np.asarray(img).astype(float), ends
+
+
+HERMITE_TENSION = 0.6                # length of the end tangents of a join, in fractions of the gap
+JOIN_MAX_ANGLE = 50                  # degrees: the most a join may turn away from the direction of a dash end
 
 
 class AxisCal(tuple):
@@ -681,7 +740,7 @@ class SpectrumDigitizer:
         self.cal_px = {k: None for k in ('x1', 'x2', 'y1', 'y2')}
         self.cal_var = {k: tk.StringVar() for k in self.cal_px}
         self.traces = []          # dicts: name, roi, color, zero, exclude, xpx, ypx
-        self.mode = None          # 'pick' | 'color' | 'zero' | 'roi' | 'excl' | 'erase' | 'keep' | 'brush' | 'straighten' | 'guide' | 'points' | None
+        self.mode = None          # 'pick' | 'color' | 'zero' | 'roi' | 'excl' | 'erase' | 'keep' | 'brush' | 'link' | 'straighten' | 'guide' | 'points' | None
         self.rgb_undo = []        # previous states of self.rgb (colour filter), newest last
         self.rgb_redo = []        # states undone, newest last; emptied by any new edit
         self.session_path = None  # file of the session in use (File > Save Session), else None
@@ -691,6 +750,8 @@ class SpectrumDigitizer:
         self._stroke_src = None   # when it continues a stored stroke: (index, number of old points, end side)
         self._gdrag = None        # a stretch of the path being pulled: dict(k, i, pts0, p0, moved)
         self._guide_target = None # curve whose brush path is being edited (None: the next stroke makes a new curve)
+        self._link_start = None       # first end of a hand link being dragged (image coordinates)
+        self._link_line = None        # its rubber band on the image
         self._ops, self._ops_redo = [], []   # one history for the three tabs: tuples of 'img' / 'guide' (see _log_op)
         self._op_group = None
         self._replaying = False
@@ -1023,6 +1084,11 @@ class SpectrumDigitizer:
         tk.Label(row, text="remove specks under", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=(6, 2))
         self._make_spin(row, self.v_speck, 'speck').pack(side=tk.LEFT)
         tk.Label(row, text="pixels", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
+        row = tk.Frame(t_clean, bg=bg)
+        row.pack(fill=tk.X, padx=10, pady=(2, 0))
+        tk.Button(row, text="Link two points by hand", command=self._start_link).pack(side=tk.LEFT, padx=2)
+        tk.Label(row, text="drag from one end to the other", bg=bg, fg='#777777', font=('Arial', 8)).pack(
+            side=tk.LEFT, padx=6)
         row = tk.Frame(t_clean, bg=bg)
         row.pack(fill=tk.X, padx=10, pady=(2, 0))
         tk.Button(row, text="Join dashes", command=self.join_dashed_lines).pack(side=tk.LEFT, padx=2)
@@ -1605,6 +1671,11 @@ class SpectrumDigitizer:
                     self._redraw()
                 else:
                     self.rotate_image(self._straightening_angle(x1, y1, x2, y2))
+        elif self.mode == 'link':
+            self._link_start = (x, y)
+            self._link_line = Line2D([x, x], [y, y], color='magenta', lw=1.2, ls='--')
+            self.ax_img.add_line(self._link_line)
+            self.canvas.draw_idle()
         elif self.mode == 'brush':
             self._push_undo()       # one undo step per stroke
             self.rgb = self.rgb.copy()
@@ -1650,6 +1721,9 @@ class SpectrumDigitizer:
             return
         if self._gdrag is not None:
             self._finish_reshape()
+            return
+        if self._link_start is not None:
+            self._finish_link(event)
             return
         if self._brush_last is not None:
             self._brush_last = None
@@ -1703,6 +1777,11 @@ class SpectrumDigitizer:
             if np.hypot(x - self._stroke[-1][0], y - self._stroke[-1][1]) >= 1.0:
                 self._stroke.append((float(x), float(y)))
                 self._refresh_overlay()
+            return
+        if self._link_start is not None:
+            x, y = self.ax_img.transData.inverted().transform((event.x, event.y))
+            self._link_line.set_data([self._link_start[0], x], [self._link_start[1], y])
+            self.canvas.draw_idle()
             return
         if self.mode == 'brush' and self._pan is None:
             x, y = self.ax_img.transData.inverted().transform((event.x, event.y))
@@ -1842,6 +1921,7 @@ class SpectrumDigitizer:
 
     def _cancel_tool(self, keep_status=False):
         self._brush_last = None
+        self._drop_link_line()
         self._straight_pts = []
         self._stroke = self._stroke_src = self._gdrag = self._guide_target = None
         self._pt_target = self._pt_sel = self._pdrag = None
@@ -1961,6 +2041,46 @@ class SpectrumDigitizer:
         self._set_status("Eraser: drag over what must go (it is painted white); the circle shows the size, set it "
                          "in 'size (px)'. One 'Undo' takes back a whole stroke. Right/middle drag moves the "
                          "image. Esc ends.")
+
+    # ---- link two points by hand (a gap that Join dashes cannot decide) ----
+    def _start_link(self):
+        if not self._need_image():
+            return
+        self._cancel_tool(keep_status=True)
+        self._nudge = None
+        self.mode = 'link'
+        self.canvas.get_tk_widget().config(cursor='crosshair')
+        self._set_status("Link: press on the end of the line, drag to the end it must reach and release. Each end "
+                         "snaps to the nearest ink within a few pixels; the stroke takes the colour and thickness "
+                         "of the line. One 'Undo' per link. Right/middle drag moves the image. Esc ends.")
+
+    def _drop_link_line(self):
+        self._link_start = None
+        if self._link_line is not None:
+            try:
+                self._link_line.remove()
+            except Exception:
+                pass
+            self._link_line = None
+            self.canvas.draw_idle()
+
+    def _finish_link(self, event):
+        p0 = self._link_start
+        x, y = self.ax_img.transData.inverted().transform((event.x, event.y))
+        self._drop_link_line()
+        if np.hypot(x - p0[0], y - p0[1]) < 2:
+            self._set_status("Drag from one end of the line to the other (a click does nothing).", sticky=True)
+            return
+        res = draw_link(self.rgb, self._num(self.v_tol, 60.0, lo=1), p0, (x, y))
+        if res is None:
+            self._set_status("Neither end is near the line: start the drag on it (within a few pixels).", sticky=True)
+            return
+        self._push_undo()
+        self.rgb = res[0]
+        self.im.set_data(self.rgb.astype(np.uint8))
+        self._set_status("Linked. Drag again for another link, Esc to end; 'Undo' takes the last one back.",
+                         ok=True, sticky=True)
+        self._extract_all()
 
     def _brush_diameter(self):
         return max(1.0, self._to_float(self.v_brush.get()) or 1.0)

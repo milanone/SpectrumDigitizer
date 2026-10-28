@@ -79,15 +79,24 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   joined) except ruling lines (`guided_rules` over the whole image; unprotected when > 30 % of the curve's points lie on
   that line: a flat baseline looks like an axis), marks the trace `fixed` (so `_extract_all` keeps its points: a
   re-extraction from the erased image would find nothing) and pushes `rgb_undo`, as one undo action (`_begin_group`). `join_dashes()` labels the ink (8-connected), takes the two ends of each group along its main axis
-  (SVD), and joins pairs of ends of different groups at most `v_gap` px apart whose connecting stroke leaves both ends
-  within 70 degrees of their own direction, nearest first, each end once and two groups once; the stroke has the darkest
-  shade and the thickness of the dash. `v_gap` is set to 3 % of the image width when an image is loaded (not part of the
+  (SVD) with the local direction at each tip (pixels within 8 px: a dash bent over a peak keeps its bend), and joins pairs of
+  ends of different groups at most `v_gap` px apart whose connecting line leaves both ends within `JOIN_MAX_ANGLE` (50) degrees
+  of their own direction, cheapest first (cost = gap x (3 - cos a - cos b): a dash straight ahead beats a nearer one on the
+  other flank of a peak, which the first version, nearest-first with 70 degrees, joined with a flat bar across the apex), each
+  end once and two groups once; the join is a cubic Hermite curve (`HERMITE_TENSION`) leaving along the end directions, not a
+  straight chord (chords cut the peaks); it has the darkest shade and the thickness of the dash. `v_gap` is set to 3 % of the image width when an image is loaded (not part of the
   session). Ends were first taken as the extreme columns: that made horizontal stubs on steep dashes (the peak at 800 nm of
   the test figure), hence the principal axis. Limits: dashes that touch the other curve are one group (erase first), a gap
   wider than the limit stays, text and ticks inside the working area get joined. Tests: `tests/test_dashes.py` (synthetic
   plot with a continuous and a dashed curve, core and app). Tried on a real figure (not in the repo): a black continuous
   and a black dashed absorption spectrum; after erasing and joining 62 of ~78 gaps were closed, the rest are the
   crossings, where the erased stretch is longer than the limit.
+- **Manual link** (mode `link`, `_start_link()`, core `draw_link()`): the fix for what `join_dashes()` cannot decide. Press on one end,
+  drag (rubber band `_link_line`, a `Line2D` removed on release/cancel), release: `_finish_link()` calls `draw_link()`, which snaps
+  each end to the nearest ink pixel within 6 px, takes the colour (darkest third) and thickness (area / span) of the ink component
+  in a 41 px window around the first end that has one, and draws a straight PIL line; no ink near either end: nothing drawn and a
+  status message. One `_push_undo()` per link, the tool stays on until Esc. Tests: `LinkTests` and two `AppTests` (injected
+  MouseEvents) in `tests/test_dashes.py`; also checked with real Tk events (press, two motions, release, Ctrl+Z) on the Fiedor figure.
 - **Eraser** (mode `brush`): press copies `self.rgb` onto `rgb_undo` (one undo step per stroke), motion stamps
   white discs along the path (`_brush_stamp`), release re-extracts. Not clipped to the working area. The size
   circle is a separate artist (`_brush_circle`), not part of `_overlay`.

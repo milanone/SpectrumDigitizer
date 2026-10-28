@@ -65,13 +65,20 @@ can be placed precisely (it also shows the pixel and, once calibrated, the X/Y v
     than the colour tolerance) smaller than the chosen number of pixels, inside the working area. A curve is one
     big group and stays; raise the size to remove larger specks, but keep it below the size of the dots of a
     scatter plot.
-  - *Join dashes* — makes a dashed line continuous: inside the working area (or the whole image) the right end of
-    each dash is joined by a straight stroke, of the dash's colour and thickness, to the nearest end of the next
-    one if the two are at most *gaps up to* pixels apart (3 % of the image width by default; the strokes must
-    leave each end roughly along the dash). Set the working area on the plot only: text and ticks inside it are
+  - *Join dashes* — makes a dashed line continuous: inside the working area (or the whole image) the end of each
+    dash is joined, with a smooth curve of the dash's colour and thickness, to the end of the next dash if the two
+    are at most *gaps up to* pixels apart (3 % of the image width by default). The join leaves each end along the
+    local direction of the dash, so it follows a bend, and only dashes lying roughly ahead are joined (not the dash
+    on the other flank of a narrow peak, even if it is nearer). A narrow peak whose top fell entirely in a gap is
+    not recovered: the join rounds it, or leaves the gap if the two flanks do not point at each other. Set the working area on the plot only: text and ticks inside it are
     joined too. A dash that touches another line is one group with it, so digitize the continuous curve first and
     use *Erase it from the image* (Digitize tab, below), then join: the gap that the erasing leaves at the
     crossings is closed too, as long as it is within the limit. *Undo* restores.
+  - *Link two points by hand* — for a gap that *Join dashes* leaves open or gets wrong (the apex of a narrow peak,
+    a stretch erased at a crossing): press on the end of the line, drag to the end it must reach, release. Both ends
+    snap to the nearest ink within a few pixels (a link can also start on the line and end in white space), and the
+    straight stroke takes the colour and thickness of the line. The tool stays on for the next link (several short
+    links make a curve); each link is one *Undo* step; `Esc` ends; right/middle drag still moves the image.
   - *Undo / Redo* (`Ctrl+Z` / `Ctrl+Y`) — the two buttons above the tabs, the same in all three: they take back
     and redo the latest edit, whatever its kind and wherever it was made (an image edit of the Clean tab, a brush
     stroke, a hand-edited point, *Erase it from the image*), in the order the edits happened; a new edit ends the

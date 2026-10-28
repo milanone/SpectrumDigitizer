@@ -80,10 +80,10 @@ class CoreTests(unittest.TestCase):
         er[hit] = 255.0
         box = (X0 + 6, Y0, X1 - 2, Y1 - 4)
         before = sd.extract_points(er, box, None, 128, 60, 0.012)
-        joined, n = sd.join_dashes(er, 60, 25)      # a crossing leaves a longer gap
+        joined, n = sd.join_dashes(er, 60, 30)      # a crossing leaves a longer gap
         after = sd.extract_points(joined, box, None, 128, 60, 0.012)
         self.assertGreater(n, 10)
-        self.assertGreater(coverage(after[0]), 0.97)
+        self.assertGreater(coverage(after[0]), 0.95)            # the apex of the peak stays open: its flanks do not point at each other
         self.assertGreater(coverage(after[0]), coverage(before[0]))
         # and it follows the truth
         err = np.abs(np.interp(after[0], after[0], after[1]) - dashed_y(after[0]))
@@ -98,6 +98,31 @@ class CoreTests(unittest.TestCase):
         ImageDraw.Draw(img).line([(10, 50), (190, 50)], fill="black", width=3)
         _, n = sd.join_dashes(np.asarray(img).astype(float), 60, 20)
         self.assertEqual(n, 0)
+
+
+class LinkTests(unittest.TestCase):
+    def two_dashes(self):
+        img = Image.new("RGB", (120, 60), "white")
+        d = ImageDraw.Draw(img)
+        d.line([(10, 30), (40, 30)], fill=(200, 0, 0), width=3)
+        d.line([(70, 30), (100, 30)], fill=(200, 0, 0), width=3)
+        return np.asarray(img).astype(float)
+
+    def test_the_gap_is_filled_with_the_colour_and_thickness_of_the_line(self):
+        rgb = self.two_dashes()
+        out, ends = sd.draw_link(rgb, 60, (42, 33), (68, 27))            # a little off the ends: they snap
+        self.assertEqual(tuple(out[30, 55]), (200.0, 0.0, 0.0))
+        self.assertEqual(tuple(out[29, 55]), (200.0, 0.0, 0.0))          # same thickness (3 px)
+        self.assertEqual(tuple(out[34, 55]), (255.0, 255.0, 255.0))
+        self.assertAlmostEqual(ends[0][0], 40, delta=1)
+        self.assertAlmostEqual(ends[1][0], 70, delta=1)
+
+    def test_far_from_any_line_nothing_is_drawn(self):
+        self.assertIsNone(sd.draw_link(self.two_dashes(), 60, (50, 5), (55, 5)))
+
+    def test_one_end_is_enough(self):
+        out, _ = sd.draw_link(self.two_dashes(), 60, (40, 30), (55, 45))   # the second end is in the white
+        self.assertEqual(tuple(out[37, 47]), (200.0, 0.0, 0.0))
 
 
 class AppTests(unittest.TestCase):
@@ -143,6 +168,37 @@ class AppTests(unittest.TestCase):
         self.assertGreater((self.app.rgb.sum(axis=2) < 600).sum(), (erased.sum(axis=2) < 600).sum())
         self.app.undo_filter()
         np.testing.assert_array_equal(self.app.rgb, erased)
+
+    def mouse(self, name, x, y, button=1):
+        from matplotlib.backend_bases import MouseEvent
+        px, py = self.app.ax_img.transData.transform((x, y))
+        return MouseEvent(name, self.app.canvas, px, py, button=button)
+
+    def test_link_by_drag_is_one_undo_step(self):
+        a = self.app
+        a._start_link()
+        before = a.rgb.copy()
+        # a gap in the dashed curve: end of the dash at x=X0+6+14, next dash starts 9 px later
+        xa, xb = X0 + 6 + 14, X0 + 6 + 23
+        ya, yb = float(dashed_y(xa)), float(dashed_y(xb))
+        a._on_press(self.mouse('button_press_event', xa, ya))
+        self.assertIsNotNone(a._link_line)                              # the rubber band
+        a._on_motion(self.mouse('motion_notify_event', xb, yb))
+        a._on_release(self.mouse('button_release_event', xb, yb))
+        self.assertIsNone(a._link_line)
+        self.assertFalse(np.array_equal(a.rgb, before))
+        self.assertEqual(a.mode, 'link')                                # the tool stays on
+        a.undo_any()
+        np.testing.assert_array_equal(a.rgb, before)
+
+    def test_a_click_alone_links_nothing(self):
+        a = self.app
+        a._start_link()
+        before = a.rgb.copy()
+        a._on_press(self.mouse('button_press_event', 100, 100))
+        a._on_release(self.mouse('button_release_event', 100, 100))
+        np.testing.assert_array_equal(a.rgb, before)
+        self.assertEqual(a.rgb_undo, [])
 
     def test_join_with_nothing_to_join_changes_nothing(self):
         self.app.v_gap.set('1')
