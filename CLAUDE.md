@@ -72,6 +72,23 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   rest of the program keeps assuming straight axes. Test: `StraightenAngleTests`; checked on a synthetic plot tilted by 7°.
 - **Flatten colours** (`flatten_colors()`): non-white pixels (distance from white > colour tolerance, inside the working
   area) become black, undoable. Alternative to the trace mode `'any'`; flattening also changes the saved image.
+- **Dashed lines** (core `erase_mask_along()`, `join_dashes()`; methods `erase_trace()`, `join_dashed_lines()`): a dashed curve
+  next to a continuous one was lost (the continuous one wins `one_point_per_column`; the dashes only exist as separate blobs).
+  Workflow: digitize the continuous curve, `erase_trace()` whitens the non-white pixels (distance from white > 10, so the
+  pale anti-aliased edge goes too) within `v_erase` px of its polyline (consecutive points over 25 px apart are not
+  joined) except ruling lines (`guided_rules` over the whole image; unprotected when > 30 % of the curve's points lie on
+  that line: a flat baseline looks like an axis), marks the trace `fixed` (so `_extract_all` keeps its points: a
+  re-extraction from the erased image would find nothing) and pushes `rgb_undo`; the Clean-tab Undo restores the pixels but
+  not the `fixed` flag. `join_dashes()` labels the ink (8-connected), takes the two ends of each group along its main axis
+  (SVD), and joins pairs of ends of different groups at most `v_gap` px apart whose connecting stroke leaves both ends
+  within 70 degrees of their own direction, nearest first, each end once and two groups once; the stroke has the darkest
+  shade and the thickness of the dash. `v_gap` is set to 3 % of the image width when an image is loaded (not part of the
+  session). Ends were first taken as the extreme columns: that made horizontal stubs on steep dashes (the peak at 800 nm of
+  the test figure), hence the principal axis. Limits: dashes that touch the other curve are one group (erase first), a gap
+  wider than the limit stays, text and ticks inside the working area get joined. Tests: `tests/test_dashes.py` (synthetic
+  plot with a continuous and a dashed curve, core and app). Tried on a real figure (not in the repo): a black continuous
+  and a black dashed absorption spectrum; after erasing and joining 62 of ~78 gaps were closed, the rest are the
+  crossings, where the erased stretch is longer than the limit.
 - **Eraser** (mode `brush`): press copies `self.rgb` onto `rgb_undo` (one undo step per stroke), motion stamps
   white discs along the path (`_brush_stamp`), release re-extracts. Not clipped to the working area. The size
   circle is a separate artist (`_brush_circle`), not part of `_overlay`.

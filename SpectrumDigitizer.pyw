@@ -440,6 +440,96 @@ def one_point_per_column(pts):
     return pts[keep]
 
 
+def erase_mask_along(rgb, xs, ys, radius, tol=60.0):
+    """Boolean mask of the pixels of a digitized curve to erase: every non-white pixel (distance from white above 10,
+    so the pale anti-aliased edge of the stroke goes too) within `radius` pixels of the polyline through the extracted
+    points (`xs`, `ys`, image pixels). Consecutive points further apart than 25 px are not joined (a dotted curve is
+    covered by discs only). Ruling lines (axes, frame, grid: rows or columns of the dark mask over half of the image,
+    found with `tol`) are never part of it, so the axes survive the erasing, unless the curve itself runs along that
+    line (over 30 % of its points: a flat baseline)."""
+    H, W = rgb.shape[:2]
+    img = Image.new('L', (W, H), 0)
+    draw = ImageDraw.Draw(img)
+    pts = np.c_[np.asarray(xs, float), np.asarray(ys, float)]
+    for (xa, ya), (xb, yb) in zip(pts[:-1], pts[1:]):
+        if np.hypot(xb - xa, yb - ya) <= 25:
+            draw.line([(xa, ya), (xb, yb)], fill=255, width=1)
+    for x, y in pts:
+        draw.point((x, y), fill=255)
+    path = np.asarray(img) > 0
+    if not path.any():
+        return path
+    near = ndi.distance_transform_edt(~path) <= max(float(radius), 1.0)
+    ink = np.sqrt(((255.0 - rgb) ** 2).sum(axis=2)) > 10.0
+    rule_rows, rule_cols = guided_rules(rgb, 'any', tol, 128, 0, 0, H, W)
+    for flags, coord in ((rule_rows, pts[:, 1]), (rule_cols, pts[:, 0])):
+        for run in groups(np.nonzero(flags)[0]):       # a flat curve (a baseline) looks like a ruling line,
+            if np.mean(np.abs(coord - run.mean()) <= radius + 2) > 0.3:   # but the curve runs along it
+                flags[run] = False
+    rule_rows, rule_cols = ndi.binary_dilation(rule_rows), ndi.binary_dilation(rule_cols)
+    ink[rule_rows, :] = False
+    ink[:, rule_cols] = False
+    return ink & near
+
+
+def join_dashes(rgb, tol, max_gap, region=None):
+    """Make dashed lines continuous. The ink (distance from white above `tol`, inside `region` if given) is split in
+    connected groups; each group has two ends (the extremes along its main axis). Two ends of different groups
+    that are at most `max_gap` pixels apart, and that look at each other (the straight stroke between them leaves
+    each end within 70 degrees of its own direction), are joined by that stroke, nearest pairs first, each end used
+    once and two groups joined at most once. The stroke has the colour (darkest shades) and thickness of the dash.
+    Returns (new float image, number of joins). Dashes that touch another line are one group with it: erase that
+    line first (the gap it leaves is joined too)."""
+    ink = np.sqrt(((255.0 - rgb) ** 2).sum(axis=2)) > tol
+    if region is not None:
+        ink &= region
+    lab, n = ndi.label(ink, structure=np.ones((3, 3)))
+    ends = []                                        # (group, end point, outward unit vector)
+    look = []                                        # (colour, thickness) per group
+    for i, sl in enumerate(ndi.find_objects(lab), 1):
+        ys, xs = np.nonzero(lab[sl] == i)
+        ys, xs = ys + sl[0].start, xs + sl[1].start
+        if len(xs) < 4:
+            continue
+        pts = np.c_[xs, ys].astype(float)
+        c = pts.mean(axis=0)
+        axis = np.linalg.svd(pts - c, full_matrices=False)[2][0]
+        t = (pts - c) @ axis
+        g = len(look)
+        for sign in (-1, 1):
+            tip = t.max() if sign > 0 else t.min()
+            sel = (t >= tip - 1.5) if sign > 0 else (t <= tip + 1.5)
+            ends.append((g, pts[sel].mean(axis=0), sign * axis))
+        shade = rgb[ys, xs]
+        dark = shade[np.argsort(shade.sum(axis=1))[:max(1, len(xs) // 3)]]
+        span = max(np.ptp(xs), np.ptp(ys)) + 1
+        look.append((tuple(int(v) for v in np.median(dark, axis=0)), max(1, int(round(len(xs) / span)))))
+    cos_min = np.cos(np.radians(70))
+    cand = []
+    for a in range(len(ends)):
+        for b in range(a + 1, len(ends)):
+            ga, pa, da = ends[a]
+            gb, pb, db = ends[b]
+            if ga == gb:
+                continue
+            v = pb - pa
+            d = float(np.hypot(*v))
+            if d <= max_gap and (d < 1e-9 or ((v @ da) / d >= cos_min and (-v @ db) / d >= cos_min)):
+                cand.append((d, a, b))
+    img = Image.fromarray(rgb.astype(np.uint8))
+    draw = ImageDraw.Draw(img)
+    used, pairs, joins = set(), set(), 0
+    for d, a, b in sorted(cand):
+        ga, gb = ends[a][0], ends[b][0]
+        if a in used or b in used or (min(ga, gb), max(ga, gb)) in pairs:
+            continue
+        used.update((a, b))
+        pairs.add((min(ga, gb), max(ga, gb)))
+        draw.line([tuple(ends[a][1]), tuple(ends[b][1])], fill=look[ga][0], width=max(look[ga][1], look[gb][1]))
+        joins += 1
+    return np.asarray(img).astype(float), joins
+
+
 class AxisCal(tuple):
     """Two-point calibration ((p1, v1), (p2, v2)) of an axis: pixel p1 shows the value v1, pixel p2 the value v2.
     With `log` the scale is logarithmic (log10 of the value is linear in the pixel; the values must be positive).
@@ -616,6 +706,8 @@ class SpectrumDigitizer:
         self._analysis = None     # when set (the Compute button), recomputed and shaded on every redraw of the result
         self._analysis_shapes = []
         self.v_speck = tk.StringVar(value='6')     # despeckle: blobs with fewer pixels than this are removed
+        self.v_gap = tk.StringVar(value='15')      # join dashes: largest gap between two dashes, pixels
+        self.v_erase = tk.StringVar(value='4')     # erase curve: distance from the extracted line, pixels
         self.v_grid = tk.BooleanVar(value=False)   # draw the check grid of the calibration over the image
         self.v_xlog = tk.BooleanVar(value=False)   # the X axis of the plot is logarithmic
         self.v_ylog = tk.BooleanVar(value=False)   # the Y axis of the plot is logarithmic
@@ -860,6 +952,12 @@ class SpectrumDigitizer:
             side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         tk.Button(row, text="Set zero line", command=lambda: self._start_point('zero')).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        row = tk.Frame(t_dig, bg=bg)
+        row.pack(fill=tk.X, padx=10, pady=(2, 0))
+        tk.Button(row, text="Erase it from the image", command=self.erase_trace).pack(side=tk.LEFT, padx=2)
+        tk.Label(row, text="within", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=(6, 2))
+        self._make_spin(row, self.v_erase, 'erase').pack(side=tk.LEFT)
+        tk.Label(row, text="pixels", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
 
         # optional clean-up of the image by colour
         self.v_tol = tk.StringVar(value='60')
@@ -918,6 +1016,12 @@ class SpectrumDigitizer:
         tk.Button(row, text="Despeckle", command=self.despeckle).pack(side=tk.LEFT, padx=2)
         tk.Label(row, text="remove specks under", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=(6, 2))
         self._make_spin(row, self.v_speck, 'speck').pack(side=tk.LEFT)
+        tk.Label(row, text="pixels", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
+        row = tk.Frame(t_clean, bg=bg)
+        row.pack(fill=tk.X, padx=10, pady=(2, 0))
+        tk.Button(row, text="Join dashes", command=self.join_dashed_lines).pack(side=tk.LEFT, padx=2)
+        tk.Label(row, text="gaps up to", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=(6, 2))
+        self._make_spin(row, self.v_gap, 'gap').pack(side=tk.LEFT)
         tk.Label(row, text="pixels", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
         row = tk.Frame(t_clean, bg=bg)
         row.pack(fill=tk.X, padx=10, pady=(8, 0))
@@ -1063,7 +1167,7 @@ class SpectrumDigitizer:
             new = min(max(new, g[0]), g[-1])
         else:                                          # simple bounded numbers: (min, max, increment)
             lo, hi, inc = {'thresh': (0, 255, 5), 'tol': (1, 441, 5), 'bwidth': (2, 200, 2), 'dot': (0.1, 50, 0.1),
-                           'reach': (10, 400, 10), 'speck': (1, 500, 1),
+                           'reach': (10, 400, 10), 'speck': (1, 500, 1), 'gap': (1, 200, 1), 'erase': (1, 30, 1),
                            'ppd': (1, 2000, 5)}[kind]
             new = min(hi, max(lo, (lo if x is None else x) + direction * inc))
         var.set(f"{new:.10g}")
@@ -1198,6 +1302,7 @@ class SpectrumDigitizer:
         self.rgb_undo, self.rgb_redo = [], []
         self.work_box = None
         self.v_angle.set('0')
+        self.v_gap.set(str(max(5, round(0.03 * self.rgb.shape[1]))))   # dashes are drawn in proportion to the figure
         self.traces = []
         for axis in ('x', 'y'):
             for key in (axis + '1', axis + '2'):
@@ -2096,6 +2201,54 @@ class SpectrumDigitizer:
         self._set_status(f"{n} non-white pixels made black (tolerance {tol:g} from white). Pale pixels closer to "
                          "white are left as they are; lower the tolerance to include them. 'Undo' restores.",
                          ok=True, sticky=True)
+        self._extract_all()
+
+    def join_dashed_lines(self):
+        """Make dashed lines continuous inside the working area (or the whole image): see join_dashes(). Undoable;
+        kept by 'Save Cleaned Image'. Best after erasing the continuous curves that cross the dashed one."""
+        if not self._need_image():
+            return
+        self._cancel_tool(keep_status=True)
+        tol = self._num(self.v_tol, 60.0, lo=1)
+        gap = self._num(self.v_gap, 15.0, lo=1)
+        new, joins = join_dashes(self.rgb, tol, gap, self._work_mask(self.rgb.shape[:2]))
+        if joins == 0:
+            self._set_status(f"No dashes to join (no two ends closer than {gap:g} pixels). Raise the gap, or set the "
+                             "working area around the dashed line only.", sticky=True)
+            return
+        self._push_undo()
+        self.rgb = new
+        self.im.set_data(self.rgb.astype(np.uint8))
+        self._set_status(f"{joins} gaps joined (up to {gap:g} pixels). Text and ticks inside the working area are "
+                         "joined too: set the area on the plot only. 'Undo' restores.", ok=True, sticky=True)
+        self._extract_all()
+
+    def erase_trace(self):
+        """Paint white, in the image, the pixels of the selected curve (the ink within a few pixels of its extracted
+        line): what remains is easier to see and to digitize (a dashed line under a continuous one). The curve
+        keeps its points (it becomes 'fixed', like a hand-edited one: 'Re-extract' would find nothing any more).
+        Axes and frame are not erased. The image part is undoable in the Clean tab."""
+        tr = self._selected()
+        if tr is None or len(tr['xpx']) == 0:
+            self._set_status("Select a curve with extracted points first.", sticky=True)
+            return
+        self._cancel_tool(keep_status=True)
+        hit = erase_mask_along(self.rgb, tr['xpx'], tr['ypx'], self._num(self.v_erase, 4.0, lo=1),
+                               self._num(self.v_tol, 60.0, lo=1))
+        n = int(hit.sum())
+        if n == 0:
+            self._set_status(f"Nothing of {tr['name']} left to erase.", sticky=True)
+            return
+        self._push_undo()
+        self.rgb = self.rgb.copy()
+        self.rgb[hit] = 255.0
+        self.im.set_data(self.rgb.astype(np.uint8))
+        if not tr.get('fixed'):
+            self._guide_push(tr)
+            tr['fixed'] = True
+        self._set_status(f"{tr['name']} erased from the image ({n} pixels); its points are kept. Now digitize what "
+                         "is left; 'Join dashes' (Clean tab) closes the gaps of a dashed line, also where this "
+                         "curve crossed it. 'Undo' (Clean tab) puts the pixels back.", ok=True, sticky=True)
         self._extract_all()
 
     # ---- semi-automatic tracing with a brush ----
