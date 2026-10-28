@@ -65,11 +65,6 @@ can be placed precisely (it also shows the pixel and, once calibrated, the X/Y v
     than the colour tolerance) smaller than the chosen number of pixels, inside the working area. A curve is one
     big group and stays; raise the size to remove larger specks, but keep it below the size of the dots of a
     scatter plot.
-  - *Link two points by hand* — for a gap that *Join dashes* leaves open or gets wrong (the apex of a narrow peak,
-    a stretch erased at a crossing): press on the end of the line, drag to the end it must reach, release. Both ends
-    snap to the nearest ink within a few pixels (a link can also start on the line and end in white space), and the
-    straight stroke takes the colour and thickness of the line. The tool stays on for the next link (several short
-    links make a curve); each link is one *Undo* step; `Esc` ends; right/middle drag still moves the image.
   - *Undo / Redo* (`Ctrl+Z` / `Ctrl+Y`) — the two buttons above the tabs, the same in all three: they take back
     and redo the latest edit, whatever its kind and wherever it was made (an image edit of the Clean tab, a brush
     stroke, a hand-edited point, *Erase it from the image*), in the order the edits happened; a new edit ends the
@@ -143,6 +138,11 @@ can be placed precisely (it also shows the pixel and, once calibrated, the X/Y v
     and ticks inside it are joined too. A dash that touches another line is one group with it, so digitize the
     continuous curve first and use *Erase it from the image*, then draw a box around the dashed one and join: the
     gap that the erasing leaves at the crossings is closed too, as long as it is within the limit. *Undo* restores.
+  - *Link two points by hand* — for a gap that *Join dashes* leaves open or gets wrong (the apex of a narrow peak,
+    a stretch erased at a crossing): press on the end of the line, drag to the end it must reach, release. Both ends
+    snap to the nearest ink within a few pixels (a link can also start on the line and end in white space), and the
+    straight stroke takes the colour and thickness of the line. The tool stays on for the next link (several short
+    links make a curve); each link is one *Undo* step; `Esc` ends; right/middle drag still moves the image.
   - Rename (also by double-click) or Remove.
 - **Tab 'Output'.** X step and normalization, and the *Smoothing* box (window and polynomial order), act live on the result plot. The numbers have up/down arrows (here and in the other tabs: tolerance, thresholds, brush width) (also the arrow keys, and press-and-hold): the X step walks 0.1, 0.2, 0.5, 1, 2, 5, 10..., the smoothing window moves by one X step, the polynomial order by one. The left pane has two views, *Image* and *Result plot*: under the image there is a small preview (drag the boundary to resize it), and the *Result plot* view shows the digitized curves large, with axis labels, a legend and the matplotlib toolbar (zoom, pan, *save as image*). Opening the Output tab switches the left pane to the Result plot, the other tabs switch it back to the image; the views can also be chosen by hand.  *Export CSV* (the green button, always visible) writes one column per curve. *Copy table to clipboard (for Excel)* puts the same table on the clipboard as tab-separated text (File → Copy Table to Clipboard too); the *decimal comma* box writes ',' instead of '.', which an Italian/European Excel needs to take the numbers as numbers (it starts ticked when the system's number format uses the comma). The *Advanced extraction settings* (dark threshold, colour tolerance, single-dot size) are at the bottom of the Digitize tab. **Analysis** (box at the bottom of the tab): area, peak and length of one curve, or of all of them, between two X values
   (empty = the whole curve; the limits need not be on the grid, they are interpolated). The values are those of the table, so

@@ -1033,6 +1033,11 @@ class SpectrumDigitizer:
         tk.Label(row, text="gaps up to", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=(6, 2))
         self._make_spin(row, self.v_gap, 'gap').pack(side=tk.LEFT)
         tk.Label(row, text="pixels", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
+        row = tk.Frame(t_dig, bg=bg)
+        row.pack(fill=tk.X, padx=10, pady=(2, 0))
+        tk.Button(row, text="Link two points by hand", command=self._start_link).pack(side=tk.LEFT, padx=2)
+        tk.Label(row, text="drag from one end to the other", bg=bg, fg='#777777', font=('Arial', 8)).pack(
+            side=tk.LEFT, padx=6)
 
         # optional clean-up of the image by colour
         self.v_tol = tk.StringVar(value='60')
@@ -1090,11 +1095,6 @@ class SpectrumDigitizer:
         tk.Label(row, text="remove specks under", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=(6, 2))
         self._make_spin(row, self.v_speck, 'speck').pack(side=tk.LEFT)
         tk.Label(row, text="pixels", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
-        row = tk.Frame(t_clean, bg=bg)
-        row.pack(fill=tk.X, padx=10, pady=(2, 0))
-        tk.Button(row, text="Link two points by hand", command=self._start_link).pack(side=tk.LEFT, padx=2)
-        tk.Label(row, text="drag from one end to the other", bg=bg, fg='#777777', font=('Arial', 8)).pack(
-            side=tk.LEFT, padx=6)
         row = tk.Frame(t_clean, bg=bg)
         row.pack(fill=tk.X, padx=10, pady=(8, 0))
         tk.Label(row, text="Colour tolerance", bg=bg, font=('Arial', 9)).pack(side=tk.LEFT, padx=2)

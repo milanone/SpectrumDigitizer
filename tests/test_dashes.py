@@ -228,6 +228,15 @@ class AppTests(unittest.TestCase):
         self.assertFalse(has(tabs[0]))
         self.assertTrue(has(tabs[1]))
 
+    def test_the_manual_link_button_is_in_the_digitize_tab(self):
+        tabs = [self.app.nb.nametowidget(t) for t in self.app.nb.tabs()]
+
+        def has(w):
+            return (isinstance(w, tk.Button) and w.cget('text').startswith('Link two points')) or any(
+                has(c) for c in w.winfo_children())
+        self.assertFalse(has(tabs[0]))
+        self.assertTrue(has(tabs[1]))
+
     def test_join_with_nothing_to_join_changes_nothing(self):
         self.app.v_gap.set('1')
         self.app.join_dashed_lines()

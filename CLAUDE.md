@@ -91,7 +91,7 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   plot with a continuous and a dashed curve, core and app). Tried on a real figure (not in the repo): a black continuous
   and a black dashed absorption spectrum; after erasing and joining 62 of ~78 gaps were closed, the rest are the
   crossings, where the erased stretch is longer than the limit.
-- **Manual link** (mode `link`, `_start_link()`, core `draw_link()`): the fix for what `join_dashes()` cannot decide. Press on one end,
+- **Manual link** (mode `link`, `_start_link()`, core `draw_link()`; a button of the Digitize tab under 'Join dashes in its box', not limited to a box): the fix for what `join_dashes()` cannot decide. Press on one end,
   drag (rubber band `_link_line`, a `Line2D` removed on release/cancel), release: `_finish_link()` calls `draw_link()`, which snaps
   each end to the nearest ink pixel within 6 px, takes the colour (darkest third) and thickness (area / span) of the ink component
   in a 41 px window around the first end that has one, and draws a straight PIL line; no ink near either end: nothing drawn and a
