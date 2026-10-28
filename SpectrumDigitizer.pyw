@@ -1027,6 +1027,12 @@ class SpectrumDigitizer:
         tk.Label(row, text="within", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=(6, 2))
         self._make_spin(row, self.v_erase, 'erase').pack(side=tk.LEFT)
         tk.Label(row, text="pixels", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
+        row = tk.Frame(t_dig, bg=bg)
+        row.pack(fill=tk.X, padx=10, pady=(2, 0))
+        tk.Button(row, text="Join dashes in its box", command=self.join_dashed_lines).pack(side=tk.LEFT, padx=2)
+        tk.Label(row, text="gaps up to", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=(6, 2))
+        self._make_spin(row, self.v_gap, 'gap').pack(side=tk.LEFT)
+        tk.Label(row, text="pixels", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
 
         # optional clean-up of the image by colour
         self.v_tol = tk.StringVar(value='60')
@@ -1089,12 +1095,6 @@ class SpectrumDigitizer:
         tk.Button(row, text="Link two points by hand", command=self._start_link).pack(side=tk.LEFT, padx=2)
         tk.Label(row, text="drag from one end to the other", bg=bg, fg='#777777', font=('Arial', 8)).pack(
             side=tk.LEFT, padx=6)
-        row = tk.Frame(t_clean, bg=bg)
-        row.pack(fill=tk.X, padx=10, pady=(2, 0))
-        tk.Button(row, text="Join dashes", command=self.join_dashed_lines).pack(side=tk.LEFT, padx=2)
-        tk.Label(row, text="gaps up to", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=(6, 2))
-        self._make_spin(row, self.v_gap, 'gap').pack(side=tk.LEFT)
-        tk.Label(row, text="pixels", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=2)
         row = tk.Frame(t_clean, bg=bg)
         row.pack(fill=tk.X, padx=10, pady=(8, 0))
         tk.Label(row, text="Colour tolerance", bg=bg, font=('Arial', 9)).pack(side=tk.LEFT, padx=2)
@@ -2330,23 +2330,34 @@ class SpectrumDigitizer:
         self._extract_all()
 
     def join_dashed_lines(self):
-        """Make dashed lines continuous inside the working area (or the whole image): see join_dashes(). Undoable;
-        kept by 'Save Cleaned Image'. Best after erasing the continuous curves that cross the dashed one."""
+        """Make the dashed lines inside the box of the selected curve continuous: see join_dashes(). Only that box is
+        touched, so the other curves, the axes and the labels are left alone. Undoable; kept by 'Save Cleaned Image'.
+        Best after erasing the continuous curves that cross the dashed one."""
         if not self._need_image():
             return
+        tr = self._selected()
+        if tr is None:
+            self._set_status("Select a curve first: 'Join dashes' works only inside its box ('Add curve (drag a box)' "
+                             "around the dashed line).", sticky=True)
+            return
         self._cancel_tool(keep_status=True)
+        H, W = self.rgb.shape[:2]
+        x0, y0, x1, y1 = [int(round(v)) for v in tr['roi']]
+        region = np.zeros((H, W), bool)
+        region[max(min(y0, y1), 0):max(y0, y1), max(min(x0, x1), 0):max(x0, x1)] = True
         tol = self._num(self.v_tol, 60.0, lo=1)
         gap = self._num(self.v_gap, 15.0, lo=1)
-        new, joins = join_dashes(self.rgb, tol, gap, self._work_mask(self.rgb.shape[:2]))
+        new, joins = join_dashes(self.rgb, tol, gap, region)
         if joins == 0:
-            self._set_status(f"No dashes to join (no two ends closer than {gap:g} pixels). Raise the gap, or set the "
-                             "working area around the dashed line only.", sticky=True)
+            self._set_status(f"No dashes to join in the box of {tr['name']} (no two ends closer than {gap:g} pixels). "
+                             "Raise the gap, or enlarge the box.", sticky=True)
             return
         self._push_undo()
         self.rgb = new
         self.im.set_data(self.rgb.astype(np.uint8))
-        self._set_status(f"{joins} gaps joined (up to {gap:g} pixels). Text and ticks inside the working area are "
-                         "joined too: set the area on the plot only. 'Undo' restores.", ok=True, sticky=True)
+        self._set_status(f"{joins} gaps joined in the box of {tr['name']} (up to {gap:g} pixels). Text and ticks "
+                         "inside the box are joined too: keep the box on the line. 'Undo' restores.",
+                         ok=True, sticky=True)
         self._extract_all()
 
     def erase_trace(self):
@@ -2375,7 +2386,7 @@ class SpectrumDigitizer:
             tr['fixed'] = True
         self._end_group()
         self._set_status(f"{tr['name']} erased from the image ({n} pixels); its points are kept. Now digitize what "
-                         "is left; 'Join dashes' (Clean tab) closes the gaps of a dashed line, also where this "
+                         "is left; 'Join dashes' closes the gaps of a dashed line, also where this "
                          "curve crossed it. 'Undo' puts everything back.", ok=True, sticky=True)
         self._extract_all()
 

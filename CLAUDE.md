@@ -72,7 +72,7 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   rest of the program keeps assuming straight axes. Test: `StraightenAngleTests`; checked on a synthetic plot tilted by 7°.
 - **Flatten colours** (`flatten_colors()`): non-white pixels (distance from white > colour tolerance, inside the working
   area) become black, undoable. Alternative to the trace mode `'any'`; flattening also changes the saved image.
-- **Dashed lines** (core `erase_mask_along()`, `join_dashes()`; methods `erase_trace()`, `join_dashed_lines()`): a dashed curve
+- **Dashed lines** (core `erase_mask_along()`, `join_dashes()`; methods `erase_trace()`, `join_dashed_lines()`): (`join_dashed_lines()` is a Digitize-tab button and works only in the `roi` of the selected curve, passed as the `region` mask; no selected curve: it refuses, it does not fall back to the whole image) a dashed curve
   next to a continuous one was lost (the continuous one wins `one_point_per_column`; the dashes only exist as separate blobs).
   Workflow: digitize the continuous curve, `erase_trace()` whitens the non-white pixels (distance from white > 10, so the
   pale anti-aliased edge goes too) within `v_erase` px of its polyline (consecutive points over 25 px apart are not
@@ -87,7 +87,7 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   straight chord (chords cut the peaks); it has the darkest shade and the thickness of the dash. `v_gap` is set to 3 % of the image width when an image is loaded (not part of the
   session). Ends were first taken as the extreme columns: that made horizontal stubs on steep dashes (the peak at 800 nm of
   the test figure), hence the principal axis. Limits: dashes that touch the other curve are one group (erase first), a gap
-  wider than the limit stays, text and ticks inside the working area get joined. Tests: `tests/test_dashes.py` (synthetic
+  wider than the limit stays, text and ticks inside the box get joined. Tests: `tests/test_dashes.py` (synthetic
   plot with a continuous and a dashed curve, core and app). Tried on a real figure (not in the repo): a black continuous
   and a black dashed absorption spectrum; after erasing and joining 62 of ~78 gaps were closed, the rest are the
   crossings, where the erased stretch is longer than the limit.

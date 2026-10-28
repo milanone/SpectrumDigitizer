@@ -65,15 +65,6 @@ can be placed precisely (it also shows the pixel and, once calibrated, the X/Y v
     than the colour tolerance) smaller than the chosen number of pixels, inside the working area. A curve is one
     big group and stays; raise the size to remove larger specks, but keep it below the size of the dots of a
     scatter plot.
-  - *Join dashes* — makes a dashed line continuous: inside the working area (or the whole image) the end of each
-    dash is joined, with a smooth curve of the dash's colour and thickness, to the end of the next dash if the two
-    are at most *gaps up to* pixels apart (3 % of the image width by default). The join leaves each end along the
-    local direction of the dash, so it follows a bend, and only dashes lying roughly ahead are joined (not the dash
-    on the other flank of a narrow peak, even if it is nearer). A narrow peak whose top fell entirely in a gap is
-    not recovered: the join rounds it, or leaves the gap if the two flanks do not point at each other. Set the working area on the plot only: text and ticks inside it are
-    joined too. A dash that touches another line is one group with it, so digitize the continuous curve first and
-    use *Erase it from the image* (Digitize tab, below), then join: the gap that the erasing leaves at the
-    crossings is closed too, as long as it is within the limit. *Undo* restores.
   - *Link two points by hand* — for a gap that *Join dashes* leaves open or gets wrong (the apex of a narrow peak,
     a stretch erased at a crossing): press on the end of the line, drag to the end it must reach, release. Both ends
     snap to the nearest ink within a few pixels (a link can also start on the line and end in white space), and the
@@ -140,8 +131,18 @@ can be placed precisely (it also shows the pixel and, once calibrated, the X/Y v
     extracted line, axes and frame excepted: once a curve is digitized it disappears from the figure and what
     remains (a dashed line under a continuous one) is easier to see and to digitize. The curve keeps its
     points, like a hand-edited one (it is not re-extracted from the image any more). Where another curve crosses
-    it, that curve gets a gap (see *Join dashes* in the Clean tab). *Undo* puts back the pixels and the
+    it, that curve gets a gap (see *Join dashes in its box*). *Undo* puts back the pixels and the
     curve's state in one step.
+  - *Join dashes in its box* — makes a dashed line continuous, only inside the box of the selected curve (the box
+    of *Add curve*, so the other curves, the axes and the labels are never touched): the end of each dash is joined,
+    with a smooth curve of the dash's colour and thickness, to the end of the next dash if the two are at most *gaps
+    up to* pixels apart (3 % of the image width by default). The join leaves each end along the local direction of
+    the dash, so it follows a bend, and only dashes lying roughly ahead are joined (not the dash on the other flank
+    of a narrow peak, even if it is nearer). A narrow peak whose top fell entirely in a gap is not recovered: the
+    join rounds it, or leaves the gap if the two flanks do not point at each other. Keep the box on the line: text
+    and ticks inside it are joined too. A dash that touches another line is one group with it, so digitize the
+    continuous curve first and use *Erase it from the image*, then draw a box around the dashed one and join: the
+    gap that the erasing leaves at the crossings is closed too, as long as it is within the limit. *Undo* restores.
   - Rename (also by double-click) or Remove.
 - **Tab 'Output'.** X step and normalization, and the *Smoothing* box (window and polynomial order), act live on the result plot. The numbers have up/down arrows (here and in the other tabs: tolerance, thresholds, brush width) (also the arrow keys, and press-and-hold): the X step walks 0.1, 0.2, 0.5, 1, 2, 5, 10..., the smoothing window moves by one X step, the polynomial order by one. The left pane has two views, *Image* and *Result plot*: under the image there is a small preview (drag the boundary to resize it), and the *Result plot* view shows the digitized curves large, with axis labels, a legend and the matplotlib toolbar (zoom, pan, *save as image*). Opening the Output tab switches the left pane to the Result plot, the other tabs switch it back to the image; the views can also be chosen by hand.  *Export CSV* (the green button, always visible) writes one column per curve. *Copy table to clipboard (for Excel)* puts the same table on the clipboard as tab-separated text (File → Copy Table to Clipboard too); the *decimal comma* box writes ',' instead of '.', which an Italian/European Excel needs to take the numbers as numbers (it starts ticked when the system's number format uses the comma). The *Advanced extraction settings* (dark threshold, colour tolerance, single-dot size) are at the bottom of the Digitize tab. **Analysis** (box at the bottom of the tab): area, peak and length of one curve, or of all of them, between two X values
   (empty = the whole curve; the limits need not be on the grid, they are interpolated). The values are those of the table, so

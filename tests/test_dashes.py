@@ -200,6 +200,34 @@ class AppTests(unittest.TestCase):
         np.testing.assert_array_equal(a.rgb, before)
         self.assertEqual(a.rgb_undo, [])
 
+    def test_join_works_only_inside_the_box_of_the_selected_curve(self):
+        a = self.app
+        a.erase_trace()
+        erased = a.rgb.copy()
+        a.v_gap.set('15')
+        self.tr['roi'] = (float(X0 + 6), 0.0, 200.0, float(Y1 - 4))        # the left part of the plot
+        a.join_dashed_lines()
+        self.assertFalse(np.array_equal(a.rgb[:, :200], erased[:, :200]))      # joined inside the box
+        np.testing.assert_array_equal(a.rgb[:, 205:], erased[:, 205:])         # untouched outside it
+
+    def test_join_needs_a_selected_curve(self):
+        a = self.app
+        a.erase_trace()
+        erased = a.rgb.copy()
+        a.traces.clear()
+        a._refresh_list()
+        a.join_dashed_lines()
+        np.testing.assert_array_equal(a.rgb, erased)
+
+    def test_the_button_is_in_the_digitize_tab(self):
+        tabs = [self.app.nb.nametowidget(t) for t in self.app.nb.tabs()]
+
+        def has(w):
+            return (isinstance(w, tk.Button) and w.cget('text').startswith('Join dashes')) or any(
+                has(c) for c in w.winfo_children())
+        self.assertFalse(has(tabs[0]))
+        self.assertTrue(has(tabs[1]))
+
     def test_join_with_nothing_to_join_changes_nothing(self):
         self.app.v_gap.set('1')
         self.app.join_dashed_lines()
