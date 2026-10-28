@@ -72,9 +72,10 @@ can be placed precisely (it also shows the pixel and, once calibrated, the X/Y v
     joined too. A dash that touches another line is one group with it, so digitize the continuous curve first and
     use *Erase it from the image* (Digitize tab, below), then join: the gap that the erasing leaves at the
     crossings is closed too, as long as it is within the limit. *Undo* restores.
-  - *Undo / Redo* (`Ctrl+Z` / `Ctrl+Y`) — step back and forward through the image edits; a new edit ends the redo
-    history. In the Digitize tab the same keys undo and redo the brush edits (the *Undo* / *Redo* buttons beside
-    the brush width).
+  - *Undo / Redo* (`Ctrl+Z` / `Ctrl+Y`) — the two buttons above the tabs, the same in all three: they take back
+    and redo the latest edit, whatever its kind and wherever it was made (an image edit of the Clean tab, a brush
+    stroke, a hand-edited point, *Erase it from the image*), in the order the edits happened; a new edit ends the
+    redo history. The history is not saved in a session.
   - *Erase an area* — drag a box over a legend or a panel letter: it is painted white for all curves
     (*Undo* restores it). Do this first, so the legend is never mistaken for part of a spectrum.
 - **Tab 'Digitize'.** The steps below.
@@ -107,7 +108,7 @@ can be placed precisely (it also shows the pixel and, once calibrated, the X/Y v
   smoothly (*reach* = how far along the path, in pixels; hold `Shift` to pull an end instead of resuming
   it). The path is smoothed, the translucent corridor around it (*width*, in pixels, a little wider than the
   line) is where the curve is looked for, and the colour to follow is chosen for you: the ink colour under the path (dark pixels, or that colour, which keeps crossing curves of other colours out), or *Any colour* when that single colour would find the curve in fewer than 80 % of the columns under the brush (a curve that changes colour along its way, or is pale in places, would otherwise stop early and come out as a broken line; the status box says so if it still happens). The brush stays
-  active until `Esc`; *Brush: edit selected* goes back to a curve's path, *Undo brush* takes back the last
+  active until `Esc`; *Brush: edit selected* goes back to a curve's path, *Undo* (above the tabs) takes back the last
   edit, *Clear* drops the path. Axes, frame and grid lines are removed from the corridor like in the box mode (they are looked for in the whole image, so a curve falling onto the x axis is not replaced by the axis; a flat curve you trace on purpose is kept). Where a curve merges into the axis line it cannot be told apart and the points stop there. The
   second way is *Add curve* with a drag box around one curve that has its own space, leaving out axis
   labels, legends and panel letters. Repeat for each curve. For the selected curve:
@@ -121,20 +122,21 @@ can be placed precisely (it also shows the pixel and, once calibrated, the X/Y v
     along the curve, the same box as for the brush); click on empty space to add a point; drag a box over empty
     space to delete the points inside it; `Ctrl`+click, or select a point (click) and press `Delete`, removes one.
     `Esc` ends. A curve edited this way keeps its points when the parameters change (it is no longer recomputed);
-    *Re-extract* gives the edits up. *Undo / Redo* (`Ctrl+Z` / `Ctrl+Y` in this tab) go through them.
+    *Re-extract* gives the edits up. *Undo / Redo* (above the tabs) go through them.
   - *Curve by points* — makes a curve out of clicks alone (nothing is extracted): for a curve the program cannot see
     at all. Y is then the height above the bottom of the image unless the Y axis is calibrated or a zero line is set.
   - *Ignore an area* — drag a box over something inside the curve's box that must be skipped (a
     panel letter, a legend: they show up as spikes in the result plot).
   - *Set zero line* — click the zero level of the curve (only used without a Y calibration).
+  - *Show the extracted points on the image* — toggles the red dots (a checkbox under the list of curves).
   - *Erase it from the image* — paints white the ink within *within* pixels (4 by default) of the selected curve's
     extracted line, axes and frame excepted: once a curve is digitized it disappears from the figure and what
     remains (a dashed line under a continuous one) is easier to see and to digitize. The curve keeps its
     points, like a hand-edited one (it is not re-extracted from the image any more). Where another curve crosses
-    it, that curve gets a gap (see *Join dashes* in the Clean tab). The pixels come back with *Undo* in the Clean
-    tab.
+    it, that curve gets a gap (see *Join dashes* in the Clean tab). *Undo* puts back the pixels and the
+    curve's state in one step.
   - Rename (also by double-click) or Remove.
-- **Tab 'Output'.** X step and normalization, and the *Smoothing* box (window and polynomial order), act live on the result plot. The numbers have up/down arrows (here and in the other tabs: tolerance, thresholds, brush width) (also the arrow keys, and press-and-hold): the X step walks 0.1, 0.2, 0.5, 1, 2, 5, 10..., the smoothing window moves by one X step, the polynomial order by one. The left pane has two views, *Image* and *Result plot*: under the image there is a small preview (drag the boundary to resize it), and the *Result plot* view shows the digitized curves large, with axis labels, a legend and the matplotlib toolbar (zoom, pan, *save as image*). Opening the Output tab switches the left pane to the Result plot, the other tabs switch it back to the image; the views can also be chosen by hand. *Show the extracted points* toggles the red dots on the image. *Export CSV* (the green button, always visible) writes one column per curve. *Copy table to clipboard (for Excel)* puts the same table on the clipboard as tab-separated text (File → Copy Table to Clipboard too); the *decimal comma* box writes ',' instead of '.', which an Italian/European Excel needs to take the numbers as numbers (it starts ticked when the system's number format uses the comma). The *Advanced extraction settings* (dark threshold, colour tolerance, single-dot size) are at the bottom of the Digitize tab. **Analysis** (box at the bottom of the tab): area, peak and length of one curve, or of all of them, between two X values
+- **Tab 'Output'.** X step and normalization, and the *Smoothing* box (window and polynomial order), act live on the result plot. The numbers have up/down arrows (here and in the other tabs: tolerance, thresholds, brush width) (also the arrow keys, and press-and-hold): the X step walks 0.1, 0.2, 0.5, 1, 2, 5, 10..., the smoothing window moves by one X step, the polynomial order by one. The left pane has two views, *Image* and *Result plot*: under the image there is a small preview (drag the boundary to resize it), and the *Result plot* view shows the digitized curves large, with axis labels, a legend and the matplotlib toolbar (zoom, pan, *save as image*). Opening the Output tab switches the left pane to the Result plot, the other tabs switch it back to the image; the views can also be chosen by hand.  *Export CSV* (the green button, always visible) writes one column per curve. *Copy table to clipboard (for Excel)* puts the same table on the clipboard as tab-separated text (File → Copy Table to Clipboard too); the *decimal comma* box writes ',' instead of '.', which an Italian/European Excel needs to take the numbers as numbers (it starts ticked when the system's number format uses the comma). The *Advanced extraction settings* (dark threshold, colour tolerance, single-dot size) are at the bottom of the Digitize tab. **Analysis** (box at the bottom of the tab): area, peak and length of one curve, or of all of them, between two X values
   (empty = the whole curve; the limits need not be on the grid, they are interpolated). The values are those of the table, so
   smoothing and normalization count. *Compute* switches it on: the numbers are updated whenever the result changes and the
   integrated area is shaded on the result plot; *subtract a straight baseline between the two limits* gives the peak area

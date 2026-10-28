@@ -78,8 +78,7 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   pale anti-aliased edge goes too) within `v_erase` px of its polyline (consecutive points over 25 px apart are not
   joined) except ruling lines (`guided_rules` over the whole image; unprotected when > 30 % of the curve's points lie on
   that line: a flat baseline looks like an axis), marks the trace `fixed` (so `_extract_all` keeps its points: a
-  re-extraction from the erased image would find nothing) and pushes `rgb_undo`; the Clean-tab Undo restores the pixels but
-  not the `fixed` flag. `join_dashes()` labels the ink (8-connected), takes the two ends of each group along its main axis
+  re-extraction from the erased image would find nothing) and pushes `rgb_undo`, as one undo action (`_begin_group`). `join_dashes()` labels the ink (8-connected), takes the two ends of each group along its main axis
   (SVD), and joins pairs of ends of different groups at most `v_gap` px apart whose connecting stroke leaves both ends
   within 70 degrees of their own direction, nearest first, each end once and two groups once; the stroke has the darkest
   shade and the thickness of the dash. `v_gap` is set to 3 % of the image width when an image is loaded (not part of the
@@ -133,9 +132,13 @@ Run: `pythonw SpectrumDigitizer.pyw [image]`. Tests: `python -m unittest discove
   `_session_vars()` settings are in the JSON. The extracted points are not stored: `_extract_all()` recomputes them. Undo/redo
   history is not saved. `_set_image()` is the shared part of `load_image()` and `open_session()`. A reopened session gave the
   same points and CSV output on the test image; a newer `version` is refused.
-- **Redo**: `rgb_redo` (image) and `_guide_redo` (brush paths) are filled by the undo and emptied by any new edit
-  (`_push_undo()`, `_guide_push()`); Ctrl+Z/Ctrl+Y act on the image in the Clean tab and on the brush edits in the Digitize tab
-  (text fields keep their own undo).
+- **Undo / Redo** (two buttons above the tabs, Ctrl+Z / Ctrl+Y in any tab, text fields keep their own undo): the image edits
+  (`rgb_undo` / `rgb_redo`, `_push_undo()`) and the curve edits (`_guide_hist` / `_guide_redo`, `_guide_push()`: brush, points,
+  erase) keep their own stacks and `_ops` / `_ops_redo` record the order, one tuple of kinds per user action. `_log_op()` is
+  called by both push functions (not while `_replaying`, i.e. during a redo, which re-pushes by itself); `_begin_group()` /
+  `_end_group()` make several pushes one action (`erase_trace()`: pixels + `fixed` flag); `_guide_drop()` takes back a snapshot
+  of a click that changed nothing. `undo_any()` pops actions until one actually shrinks its stack (an entry whose curve was
+  removed is skipped by `undo_stroke`). Reset with the image (`_set_image`, `close_image`, `open_session`). Tests: `tests/test_undo.py`.
 - **Despeckle** (`despeckle()`): `ndi.label` (8-connectivity) of the non-white mask, groups under `v_speck` pixels painted white
   inside the working area, undoable. **Check grid** (`_draw_check_grid`, core `nice_ticks`): round values of the calibration as
   lines across the image. **Copy table** (`copy_table()`): tab-separated text; decimal comma option because Excel in an Italian

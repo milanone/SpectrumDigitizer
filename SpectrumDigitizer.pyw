@@ -691,6 +691,9 @@ class SpectrumDigitizer:
         self._stroke_src = None   # when it continues a stored stroke: (index, number of old points, end side)
         self._gdrag = None        # a stretch of the path being pulled: dict(k, i, pts0, p0, moved)
         self._guide_target = None # curve whose brush path is being edited (None: the next stroke makes a new curve)
+        self._ops, self._ops_redo = [], []   # one history for the three tabs: tuples of 'img' / 'guide' (see _log_op)
+        self._op_group = None
+        self._replaying = False
         self._guide_hist = []     # snapshots for the brush 'Undo'
         self._guide_redo = []     # states undone, for the brush 'Redo'; emptied by a new brush edit
         self._guide_cursor = ''
@@ -706,6 +709,7 @@ class SpectrumDigitizer:
         self._analysis = None     # when set (the Compute button), recomputed and shaded on every redraw of the result
         self._analysis_shapes = []
         self.v_speck = tk.StringVar(value='6')     # despeckle: blobs with fewer pixels than this are removed
+        self.v_points = tk.BooleanVar(value=True)  # show the extracted points on the image
         self.v_gap = tk.StringVar(value='15')      # join dashes: largest gap between two dashes, pixels
         self.v_erase = tk.StringVar(value='4')     # erase curve: distance from the extracted line, pixels
         self.v_grid = tk.BooleanVar(value=False)   # draw the check grid of the calibration over the image
@@ -852,8 +856,12 @@ class SpectrumDigitizer:
 
         # Two tabs: clean the image first, then digitize it. The status box, the magnifier and the Export
         # button are shared and stay outside the tabs.
+        row = tk.Frame(parent, bg=bg)
+        row.pack(fill=tk.X, padx=10, pady=(6, 0))
+        tk.Button(row, text="Undo  (Ctrl+Z)", command=self.undo_any).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(row, text="Redo  (Ctrl+Y)", command=self.redo_any).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         self.nb = ttk.Notebook(parent)
-        self.nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=(8, 0))
+        self.nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=(4, 0))
         t_clean = tk.Frame(self.nb, bg=bg)
         t_dig_outer, t_dig = self._scrollable(self.nb, bg)
         self.nb.add(t_clean, text="  Clean image  ")
@@ -913,9 +921,7 @@ class SpectrumDigitizer:
         self._make_spin(row, self.v_bwidth, 'bwidth').pack(side=tk.LEFT)
         tk.Label(row, text="reach", bg=bg, font=('Arial', 8)).pack(side=tk.LEFT, padx=(6, 1))
         self._make_spin(row, self.v_reach, 'reach').pack(side=tk.LEFT)
-        tk.Button(row, text="Undo", command=self.undo_stroke).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(6, 1))
-        tk.Button(row, text="Redo", command=self.redo_stroke).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=1)
-        tk.Button(row, text="Clear", command=self.clear_guide).pack(side=tk.LEFT, padx=1)
+        tk.Button(row, text="Clear", command=self.clear_guide).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(6, 1))
         self.v_bwidth.trace_add('write', lambda *_: self._on_bwidth())
         row = tk.Frame(t_dig, bg=bg)
         row.pack(fill=tk.X, padx=10, pady=(4, 0))
@@ -938,6 +944,8 @@ class SpectrumDigitizer:
         row.pack(fill=tk.X, padx=10)
         tk.Button(row, text="Rename", command=self.rename_trace).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         tk.Button(row, text="Remove", command=self.remove_trace).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Checkbutton(t_dig, text="Show the extracted points on the image", variable=self.v_points,
+                       bg=bg, command=self._redraw, anchor='w').pack(fill=tk.X, padx=10)
         tk.Label(t_dig, text="For the selected curve:", bg=bg, fg='#555555', font=('Arial', 8), anchor='w').pack(
             fill=tk.X, padx=10, pady=(4, 0))
         row = tk.Frame(t_dig, bg=bg)
@@ -1003,8 +1011,6 @@ class SpectrumDigitizer:
         self.apply_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         row = tk.Frame(t_clean, bg=bg)
         row.pack(fill=tk.X, padx=10, pady=(2, 0))
-        tk.Button(row, text="Undo  (Ctrl+Z)", command=self.undo_filter).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        tk.Button(row, text="Redo  (Ctrl+Y)", command=self.redo_filter).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         row = tk.Frame(t_clean, bg=bg)
         row.pack(fill=tk.X, padx=10, pady=(2, 0))
         tk.Button(row, text="Eraser (paint white)", command=self._start_brush).pack(side=tk.LEFT, padx=2)
@@ -1060,7 +1066,6 @@ class SpectrumDigitizer:
         self.v_smooth = tk.StringVar(value='0')
         self.v_poly = tk.StringVar(value='3')
         self.v_norm = tk.StringVar(value='none')
-        self.v_points = tk.BooleanVar(value=True)
         for v in (self.v_step, self.v_smooth, self.v_poly):
             v.trace_add('write', lambda *_: self._schedule(False))
         grid = tk.Frame(t_out, bg=bg)
@@ -1092,8 +1097,6 @@ class SpectrumDigitizer:
                  font=('Arial', 8), anchor='w', justify='left', wraplength=340).grid(
             row=2, column=0, columnspan=2, sticky='w')
         self._update_step_rows()
-        tk.Checkbutton(t_out, text="Show the extracted points on the image", variable=self.v_points,
-                       bg=bg, command=self._redraw, anchor='w').pack(fill=tk.X, padx=10)
         self.info = tk.Label(t_out, text="", bg=bg, font=('Consolas', 9), fg='#555555',
                              wraplength=370, justify='left', anchor='w')
         self.info.pack(fill=tk.X, padx=10, pady=(10, 4))
@@ -1300,6 +1303,7 @@ class SpectrumDigitizer:
         self.pil = img
         self.rgb = np.asarray(img, dtype=float)
         self.rgb_undo, self.rgb_redo = [], []
+        self._ops, self._ops_redo = [], []
         self.work_box = None
         self.v_angle.set('0')
         self.v_gap.set(str(max(5, round(0.03 * self.rgb.shape[1]))))   # dashes are drawn in proportion to the figure
@@ -1438,6 +1442,7 @@ class SpectrumDigitizer:
         self.work_box = tuple(wb) if wb else None
         self.v_angle.set(d.get('work_angle', '0'))
         self._guide_hist, self._guide_redo = [], []
+        self._ops, self._ops_redo = [], []
         self._refresh_list(select=d.get('selected') if self.traces else None)
         view = d.get('view') or {}
         H, W = self.rgb.shape[:2]
@@ -1485,6 +1490,7 @@ class SpectrumDigitizer:
         self.image_path = self.pil = self.rgb = self.im = None
         self.session_path = None
         self.rgb_undo, self.rgb_redo = [], []
+        self._ops, self._ops_redo = [], []
         self.work_box = None
         self.v_angle.set('0')
         self.traces = []
@@ -2227,7 +2233,7 @@ class SpectrumDigitizer:
         """Paint white, in the image, the pixels of the selected curve (the ink within a few pixels of its extracted
         line): what remains is easier to see and to digitize (a dashed line under a continuous one). The curve
         keeps its points (it becomes 'fixed', like a hand-edited one: 'Re-extract' would find nothing any more).
-        Axes and frame are not erased. The image part is undoable in the Clean tab."""
+        Axes and frame are not erased. One Undo takes back the pixels and the 'fixed' state together."""
         tr = self._selected()
         if tr is None or len(tr['xpx']) == 0:
             self._set_status("Select a curve with extracted points first.", sticky=True)
@@ -2239,6 +2245,7 @@ class SpectrumDigitizer:
         if n == 0:
             self._set_status(f"Nothing of {tr['name']} left to erase.", sticky=True)
             return
+        self._begin_group()                                  # the pixels and the 'fixed' flag: one Undo
         self._push_undo()
         self.rgb = self.rgb.copy()
         self.rgb[hit] = 255.0
@@ -2246,9 +2253,10 @@ class SpectrumDigitizer:
         if not tr.get('fixed'):
             self._guide_push(tr)
             tr['fixed'] = True
+        self._end_group()
         self._set_status(f"{tr['name']} erased from the image ({n} pixels); its points are kept. Now digitize what "
                          "is left; 'Join dashes' (Clean tab) closes the gaps of a dashed line, also where this "
-                         "curve crossed it. 'Undo' (Clean tab) puts the pixels back.", ok=True, sticky=True)
+                         "curve crossed it. 'Undo' puts everything back.", ok=True, sticky=True)
         self._extract_all()
 
     # ---- semi-automatic tracing with a brush ----
@@ -2333,6 +2341,15 @@ class SpectrumDigitizer:
             guide=None if created or not tr.get('guide') else [(p.copy(), w) for p, w in tr['guide']]))
         if not keep_redo:
             self._guide_redo = []
+        self._log_op('guide')
+
+    def _guide_drop(self):
+        """Take back the snapshot just pushed: the click changed nothing."""
+        self._guide_hist.pop()
+        if self._op_group is not None and 'guide' in self._op_group:
+            self._op_group.remove('guide')
+        elif ('guide',) in self._ops:
+            self._ops.pop(len(self._ops) - 1 - self._ops[::-1].index(('guide',)))
 
     @staticmethod
     def _guide_state(tr):
@@ -2376,7 +2393,7 @@ class SpectrumDigitizer:
     def _finish_reshape(self):
         d, self._gdrag = self._gdrag, None
         if not d['moved']:
-            self._guide_hist.pop()           # a click on the path: nothing changed
+            self._guide_drop()               # a click on the path: nothing changed
             return
         self._after_guide_edit("Path reshaped.")
 
@@ -2449,7 +2466,7 @@ class SpectrumDigitizer:
         else:
             k, n_old, side = src
             if len(pts) <= n_old + 1:                         # no real extension
-                self._guide_hist.pop()
+                self._guide_drop()
                 self._redraw()
                 return
             keep = max(n_old - 3, 0)                          # re-smooth the join together with the new part
@@ -2719,7 +2736,7 @@ class SpectrumDigitizer:
                     self._redraw()
             return
         if not d['moved']:                                           # a click on a point: select it
-            self._guide_hist.pop()
+            self._guide_drop()
             self._pt_sel = d['i']
             self._redraw()
             return
@@ -2855,16 +2872,80 @@ class SpectrumDigitizer:
             return                                   # a text field has its own undo
         if self.rgb is None:
             return
-        if self._clean_tab_active():
-            (self.redo_filter if redo else self.undo_filter)()
-        elif self.nb.index(self.nb.select()) == 1:
-            (self.redo_stroke if redo else self.undo_stroke)()
+        (self.redo_any if redo else self.undo_any)()
         return 'break'
+
+    # One Undo / Redo for the three tabs. The image edits (`rgb_undo`) and the curve edits (`_guide_hist`: brush, points,
+    # erase) keep their own stacks; `_ops` records in which order they happened, one tuple per user action ('Erase it
+    # from the image' is both a curve edit and an image edit), so Undo takes back the latest action whatever its kind.
+    def _log_op(self, kind):
+        if self._replaying:
+            return
+        if self._op_group is not None:
+            self._op_group.append(kind)
+        else:
+            self._ops.append((kind,))
+        self._ops_redo = []
+
+    def _begin_group(self):
+        self._op_group = []
+
+    def _end_group(self):
+        group, self._op_group = self._op_group, None
+        if group:
+            self._ops.append(tuple(group))
+            self._ops_redo = []
+
+    def _stack_of(self, kind, redo=False):
+        if kind == 'img':
+            return self.rgb_redo if redo else self.rgb_undo
+        return self._guide_redo if redo else self._guide_hist
+
+    def undo_any(self):
+        """Take back the latest edit, of the image or of the curves, from whichever tab."""
+        if self.rgb is None:
+            return
+        while self._ops:
+            op = self._ops.pop()
+            undone = []
+            for kind in reversed(op):
+                stack = self._stack_of(kind)
+                n = len(stack)
+                if not n:
+                    continue
+                (self.undo_filter if kind == 'img' else self.undo_stroke)()
+                if len(stack) < n:
+                    undone.append(kind)
+            if undone:
+                self._ops_redo.append(tuple(reversed(undone)))
+                return
+        self._set_status("Nothing to undo.", sticky=True)
+
+    def redo_any(self):
+        if self.rgb is None:
+            return
+        while self._ops_redo:
+            op = self._ops_redo.pop()
+            redone = []
+            self._replaying = True
+            try:
+                for kind in op:
+                    if not self._stack_of(kind, redo=True):
+                        continue
+                    (self.redo_filter if kind == 'img' else self.redo_stroke)()
+                    redone.append(kind)
+            finally:
+                self._replaying = False
+            if redone:
+                self._ops.append(tuple(redone))
+                return
+        self._set_status("Nothing to redo.", sticky=True)
 
     def _push_undo(self):
         """Keep the current image as the next 'Undo' step; a new edit ends the redo history."""
         self.rgb_undo.append(self.rgb)
         self.rgb_redo = []
+        self._log_op('img')
 
     def undo_filter(self):
         if not self.rgb_undo:
